@@ -2,6 +2,8 @@
 #include <amxmisc>
 #include <toys_system>
 
+#include <dqstatsx_sql>
+
 #define PLUGIN_NAME    "[Adventures] Toy Rewards"
 #define PLUGIN_VERSION "2.0"
 #define PLUGIN_AUTHOR  "medusa"
@@ -143,7 +145,15 @@ do_announce(id, const toy_name[], rarity, points)
 
 give_points_to_player(id, amount, const toy_name[])
 {
-    #pragma unused id, amount, toy_name
+    #pragma unused toy_name
+
+	new stats[DQ_STATS]
+
+	if (dq_get_user_stats(id, stats))
+	{
+        stats[DQXSQL_RANK_POINTS] += amount
+        dq_set_user_stats(id, stats)
+    }
 }
 
 get_pts_form(n)
