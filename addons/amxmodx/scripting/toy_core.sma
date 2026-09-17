@@ -439,12 +439,16 @@ spawn_toys()
 {
     remove_all_toys()
 
-    if(!g_pos_count || !g_toy_count) return
+    new ret
+    // Форвард шлём и при пустой карте (count = 0), чтобы слушатели сбросили своё состояние
+    if(!g_pos_count || !g_toy_count || g_map_count_from_file == 0)
+    {
+        ExecuteForward(g_fwd_map_complete, ret, 0)
+        return
+    }
 
     new wanted
-    if(g_map_count_from_file == 0)
-        return
-    else if(g_map_count_from_file > 0)
+    if(g_map_count_from_file > 0)
         wanted = g_map_count_from_file
     else
         wanted = get_pcvar_num(cvar_count)
@@ -473,13 +477,11 @@ spawn_toys()
         if(g_toy_rarity[toy_idx] == TOY_RARITY_LEGENDARY)
             g_legendary_spawned++
 
-        new ret
         ExecuteForward(g_fwd_spawned, ret, ent, toy_idx, pos_idx)
 
         spawned++
     }
 
-    new ret
     ExecuteForward(g_fwd_map_complete, ret, spawned)
 
     toy_log("[ToyCore] Spawned: %d (positions available: %d)", spawned, g_pos_count)
