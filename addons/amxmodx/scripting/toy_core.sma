@@ -703,14 +703,14 @@ do_spawn_entity(toy_idx, pos_idx)
     return ent
 }
 
-mark_toy_ent(ent, bool:state)
+mark_toy_ent(ent, bool:is_toy)
 {
     if(ent < 0 || ent >= MAX_EDICTS)
     {
-        if(state) toy_log("[ToyCore] Entity index %d out of MAX_EDICTS (%d), toy_hide_dead skips it", ent, MAX_EDICTS)
+        if(is_toy) toy_log("[ToyCore] Entity index %d out of MAX_EDICTS (%d), toy_hide_dead skips it", ent, MAX_EDICTS)
         return
     }
-    g_is_toy_ent[ent] = state
+    g_is_toy_ent[ent] = is_toy
 }
 
 remove_from_tracking(ent)
