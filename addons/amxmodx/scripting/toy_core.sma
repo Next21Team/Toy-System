@@ -473,9 +473,6 @@ spawn_toys()
         new ent = do_spawn_entity(toy_idx, pos_idx)
         if(!ent) continue
 
-        if(g_toy_rarity[toy_idx] == TOY_RARITY_LEGENDARY)
-            g_legendary_spawned++
-
         ExecuteForward(g_fwd_spawned, ret, ent, toy_idx, pos_idx)
 
         spawned++
@@ -595,6 +592,8 @@ pick_unused_of_rarity(rarity)
 
 do_spawn_entity(toy_idx, pos_idx)
 {
+    if(g_ent_count >= MAX_POSITIONS) return 0
+
     new ent = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, "info_target"))
     if(!pev_valid(ent)) return 0
 
@@ -630,13 +629,13 @@ do_spawn_entity(toy_idx, pos_idx)
     set_pev(ent, pev_framerate, g_toy_framerate[toy_idx])
     set_pev(ent, pev_animtime,  get_gametime())
 
-    if(g_ent_count < MAX_POSITIONS)
-    {
-        g_ent_list[g_ent_count]    = ent
-        g_ent_toy_idx[g_ent_count] = toy_idx
-        g_ent_pos_idx[g_ent_count] = pos_idx
-        g_ent_count++
-    }
+    g_ent_list[g_ent_count]    = ent
+    g_ent_toy_idx[g_ent_count] = toy_idx
+    g_ent_pos_idx[g_ent_count] = pos_idx
+    g_ent_count++
+
+    if(g_toy_rarity[toy_idx] == TOY_RARITY_LEGENDARY)
+        g_legendary_spawned++
 
     return ent
 }

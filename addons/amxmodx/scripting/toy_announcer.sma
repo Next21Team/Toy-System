@@ -29,6 +29,11 @@ public toy_on_map_spawn_complete(count)
         set_task(ANN_INTERVAL, "task_announce", TASK_ANNOUNCE)
 }
 
+public toy_on_spawned(ent, toy_idx, pos_idx)
+{
+    g_total_toys++
+}
+
 public task_announce()
 {
     new remaining = toy_get_spawned_count()
