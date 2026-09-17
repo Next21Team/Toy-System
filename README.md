@@ -233,7 +233,7 @@ weighted random across all tiers.
 - First announcement fires **~4.5 minutes** after map start
 - Subsequent announcements every **~4.5 minutes** (configurable in source: `ANN_INTERVAL`)
 - Announces only if at least 1 toy remains uncollected
-- Players can type `/toy` at any time to check the current count
+- Players can type `/toy` at any time to check the current count (if no toys were spawned on the map, it says so instead of "all collected")
 
 ---
 
@@ -375,7 +375,7 @@ Called **once per map**, right after all initial toys have been spawned.
 
 | Parameter | Description |
 |---|---|
-| `count` | Actual number of toys spawned (may be less than requested if positions/types ran out) |
+| `count` | Actual number of toys spawned (may be less than requested if positions/types ran out; `0` if the map has no positions, no toy types, or the per-map count is `0`) |
 
 **Return:** ignored
 
@@ -784,7 +784,7 @@ count 3
 - Первый анонс — через **~4.5 минуты** после старта карты
 - Следующие анонсы — каждые **~4.5 минуты** (настраивается в исходнике: `ANN_INTERVAL`)
 - Анонс отправляется только если на карте ещё есть хотя бы 1 не собранная игрушка
-- Игрок может написать `/toy` в любой момент, чтобы узнать количество оставшихся
+- Игрок может написать `/toy` в любой момент, чтобы узнать количество оставшихся (если на карте игрушки не спавнились, об этом будет отдельное сообщение, а не «все собраны»)
 
 ---
 
@@ -926,7 +926,7 @@ public toy_on_spawned(ent, toy_idx, pos_idx)
 
 | Параметр | Описание |
 |---|---|
-| `count` | Сколько игрушек реально заспавнилось (может быть меньше запрошенного, если не хватило позиций/типов) |
+| `count` | Сколько игрушек реально заспавнилось (может быть меньше запрошенного, если не хватило позиций/типов; `0`, если на карте нет позиций, типов игрушек или лимит карты равен `0`) |
 
 **Возврат:** игнорируется
 

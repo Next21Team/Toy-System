@@ -49,7 +49,9 @@ public task_announce()
 public cmd_toy(id)
 {
     new remaining = toy_get_spawned_count()
-    if(remaining <= 0)
+    if(remaining <= 0 && g_total_toys <= 0)
+        client_print_color(id, print_team_default, "%L", id, "TOY_ANN_NO_TOYS")
+    else if(remaining <= 0)
         client_print_color(id, print_team_default, "%L", id, "TOY_ANN_NONE")
     else
         client_print_color(id, print_team_default, "%L", id, "TOY_ANN_CMD", remaining, g_total_toys)
