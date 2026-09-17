@@ -440,7 +440,6 @@ spawn_toys()
     remove_all_toys()
 
     new ret
-    // Форвард шлём и при пустой карте (count = 0), чтобы слушатели сбросили своё состояние
     if(!g_pos_count || !g_toy_count || g_map_count_from_file == 0)
     {
         ExecuteForward(g_fwd_map_complete, ret, 0)
