@@ -68,6 +68,7 @@ The system consists of 5 plugins that must all be loaded together:
 | `toy_enabled` | `1` | Enable/disable the entire system |
 | `toy_count` | `5` | Default number of toys spawned per map (used if no per-map override) |
 | `toy_logging` | `0` | Enable debug logging to `logs/toy_system.log` |
+| `toy_hide_dead` | `1` | Hide toys from dead players and spectators |
 | `toy_use_range` | `40` | Max distance (units) at which a player can pick up a toy |
 | `toy_admin_flags` | `g` | Admin flag required to access the toy admin menu |
 
@@ -629,6 +630,7 @@ Adventures Toy System — модульная система плагинов д�
 | `toy_enabled` | `1` | Включить/выключить всю систему |
 | `toy_count` | `5` | Количество игрушек на карте по умолчанию (если нет переопределения) |
 | `toy_logging` | `0` | Включить запись отладочного лога в `logs/toy_system.log` |
+| `toy_hide_dead` | `1` | Скрывать игрушки от мёртвых игроков и наблюдателей |
 | `toy_use_range` | `40` | Максимальная дистанция (единицы) для подбора игрушки |
 | `toy_admin_flags` | `g` | Флаг доступа для открытия админ-меню |
 
