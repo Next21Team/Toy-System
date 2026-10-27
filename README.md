@@ -66,7 +66,7 @@ The system consists of 5 plugins that must all be loaded together:
 | CVar | Default | Description |
 |---|---|---|
 | `toy_enabled` | `1` | Enable/disable the entire system |
-| `toy_count` | `5` | Default number of toys spawned per map (used if no per-map override) |
+| `toy_count` | `5` | Random toys per map (used if no per-map override); guaranteed points are additional |
 | `toy_logging` | `0` | Enable debug logging to `logs/toy_system.log` |
 | `toy_hide_dead` | `1` | Hide toys from dead players and spectators |
 | `toy_use_range` | `40` | Max distance (units) at which a player can pick up a toy |
@@ -87,7 +87,7 @@ The system consists of 5 plugins that must all be loaded together:
 | Command | Description |
 |---|---|
 | `say /toys` | Opens the toy admin menu (requires `toy_admin_flags`) |
-| `amx_toys_menu` | Same as above, from server console or RCON |
+| `amx_toys_menu` | Same as above, from an in-game player console |
 
 ---
 
@@ -102,7 +102,7 @@ Open with `say /toys`. Requires the flag set in `toy_admin_flags` (default: `g`)
 - **Manage positions** — list all positions; click to teleport, then edit/delete/rebind
 - **Respawn toys** — remove all current toys and respawn a fresh set
 - **Delete all positions** — remove ALL positions for the current map (with confirmation)
-- **Toy count** — set how many toys spawn on this map (auto / off / 1–N); autosaves 2 seconds after change
+- **Random toy count** — set how many random toys spawn on this map (auto / 0 / 1–N); autosaves 2 seconds after change
 
 ### Placement Mode
 
@@ -112,20 +112,22 @@ After selecting **Add position**, you enter placement mode:
 - `MOUSE1` / `MOUSE2` — rotate the model left/right (yaw)
 - The model auto-rotates 180° to face you when first placed
 - Use the placement menu to:
-  - **Save position** — confirm placement; choose a specific toy or Random
+  - **Spawn: Random / Guaranteed** — choose whether the position participates in random selection or always spawns
+  - **Save position** — confirm placement; rarity is selected independently
   - **Cancel** — exit without saving
 
 ### Visualization
 
 - Green laser beams show all saved positions on the map
-- HUD overlay shows position index, coordinates, yaw, and bound toy
+- HUD overlay shows position index, coordinates, yaw, rarity and spawn mode
 - Models cycle every 3 seconds if set to Random (skin/body are applied from config)
 
 ### Editing a Position
 
 In **Manage positions**, click any position to open its edit menu:
 
-- **Toy: [name] (change)** / **Toy: Random (bind)** — change which toy is bound here
+- **Rarity** — change the rarity bound to this point
+- **Spawn: Random / Guaranteed** — change the spawn mode; applies on next map load or manual respawn
 - **Relocate** — re-enter placement mode to move the position
 - **Delete position** — remove with confirmation
 
@@ -204,6 +206,30 @@ Binding the point to a **tier** means any toy of that tier may spawn there
 (randomly chosen among toys that share that rarity). `any` or no binding =
 weighted random across all tiers.
 
+#### Random and guaranteed points
+
+Append `spawn=guaranteed` after the rarity to make a point guaranteed, for example:
+`100.0000 200.0000 30.0000 90.0000 any spawn=guaranteed`.
+Use `any` when no particular rarity is required. `spawn=random` is also accepted;
+old lines without a mode remain random and keep their coordinates and rarity binding.
+Legacy numeric/name bindings and difficulty-prefixed rows are still read.
+
+Guaranteed points spawn first and are excluded from random selection. With ten random
+points, `count 3` and two guaranteed points, the target is five toys. `count 0` or
+`toy_count 0` disables only random toys. A fixed legendary point takes priority over
+free rarity selection; the one-concurrent-legendary limit remains in force. The admin
+menu rejects guaranteed settings that cannot be fulfilled with the available models
+and rarity weights. A failed guaranteed spawn is logged (e.g. missing models or entity capacity).
+
+Spawning runs on map load or manual respawn, not every round; collected toys do not
+refill automatically. Respawning does not reset the per-player pickup limit.
+Reconnect persistence requires a stable unique SteamID. Shared LAN/BOT or pending IDs
+use a per-connection limit and are not stored as shared identity keys.
+
+Saving uses a temporary file and keeps the previous file as `.ini.bak`.
+Unreadable files, malformed coordinates/mode metadata or more than 512 points block
+saving to avoid overwriting incomplete data. Loading alone does not rewrite a map file.
+
 ---
 
 ## Rarity System
@@ -216,7 +242,7 @@ weighted random across all tiers.
 | Legendary | 5 | Gold |
 
 - Weights are configurable in `toy_models.ini` under the `"weights"` section
-- Legendary is capped at **1 per map** regardless of weight
+- Legendary is capped at **1 live toy at a time** regardless of weight
 - The shuffle-bag system ensures variety: all models of a rarity will appear before any model repeats
 - **Per-position binding** (v2.1+): an admin can bind a spawn position to a
   specific tier. A random toy of that tier will be picked; weighted selection
@@ -310,10 +336,10 @@ Called **before** a toy is removed, when a player attempts to pick it up.
 - `PLUGIN_HANDLED` — block pickup (toy stays on map, no rewards given)
 
 **Use cases:**
-- Add your own points/money/XP system (this is what `toy_rewards.amxx` does)
+- Add your own points/money/XP system through `toy_on_collected` (used by `toy_rewards.amxx`)
 - Restrict pickup by team, VIP flag, or condition
-- Log or broadcast custom pickup events
-- Grant gameplay bonuses (HP, armor, weapons)
+- Log pickup attempts; use `toy_on_collected` for successful-pickup announcements
+- Grant gameplay bonuses (HP, armor, weapons) through `toy_on_collected`
 
 **Example — block pickup for CTs:**
 ```pawn
@@ -330,7 +356,7 @@ public toy_on_pickup(id, ent, toy_idx)
 
 **Example — give HP on pickup:**
 ```pawn
-public toy_on_pickup(id, ent, toy_idx)
+public toy_on_collected(id, toy_idx)
 {
     new rarity = toy_get_rarity(toy_idx)
     new hp = (rarity == TOY_RARITY_LEGENDARY) ? 100 : 25
@@ -338,6 +364,16 @@ public toy_on_pickup(id, ent, toy_idx)
     return PLUGIN_CONTINUE
 }
 ```
+
+---
+
+#### `toy_on_collected(id, toy_idx)`
+
+Notification after accepted pickup and entity removal (`ET_IGNORE`); return values
+do not cancel pickup. Grant rewards here, not in `toy_on_pickup`, because another
+pre-forward handler can reject the attempt. The `dq` branch retains its
+`dqstatsx_sql` integration; its points callback now runs on this successful event.
+Update the core, pickup and rewards modules together when adopting this callback.
 
 ---
 
@@ -441,6 +477,15 @@ Number of saved positions for the current map (from `data/toy_spawn/<map>.ini`).
 
 ---
 
+### Natives — Spawn modes
+
+`TOY_SPAWN_RANDOM` = 0; `TOY_SPAWN_GUARANTEED` = 1. Mode and rarity are independent.
+
+- `toy_get_pos_mode(pos_idx)` — mode, or -1 for an invalid index.
+- `toy_get_pos_count_by_mode(mode)` — number of saved points of that mode.
+- `toy_can_set_position(rarity, mode, exclude_pos = -1)` — validate models/weights and legendary capacity; exclude the edited point.
+- `toy_set_pos_mode(pos_idx, mode)` — change mode in memory, return 1/0; save explicitly.
+
 ### Natives — Position management
 
 Positions are spawn anchors placed by admins. Each position has an origin, yaw, and an optional **rarity-tier binding** (v2.1+).
@@ -453,24 +498,24 @@ Reads position data by index.
 
 Returns `1` on success, `0` if `pos_idx` is out of range.
 
-#### `toy_add_position(const Float:origin[3], Float:yaw, bound_rarity = TOY_RARITY_ANY)`
-Creates a new position in memory. Returns new `pos_idx` or `-1` if full (max 512 positions).  
+#### `toy_add_position(const Float:origin[3], Float:yaw, bound_rarity = TOY_RARITY_ANY, spawn_mode = TOY_SPAWN_RANDOM)`
+Creates a new position in memory. Returns new `pos_idx` or `-1` if full (max 512 positions) or a guaranteed setting is invalid.
 **Does not save automatically** — call `toy_save_positions()` after batch changes.
 
 #### `toy_remove_position(pos_idx)`
-Removes position at index. Indices of later positions shift down by 1.
+Removes the position and its live toy. Indices of later positions shift down by 1.
 
-#### `toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_rarity)`
-Overwrites an existing position's data.
+#### `toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_rarity, spawn_mode = -1)`
+Overwrites an existing position's data. Omitted `spawn_mode` preserves its current mode; returns 0 for invalid or impossible guaranteed settings.
 
 #### `toy_save_positions()`
-Writes the current in-memory positions to `data/toy_spawn/<currentmap>.ini`. Call after adding/removing/updating.
+Writes the current in-memory positions to `data/toy_spawn/<currentmap>.ini`. Call after adding/removing/updating. Returns 1 on success, 0 on a write error or read-only protection.
 
 #### `toy_reload_positions()`
-Re-reads the file and replaces in-memory positions. Useful after manual file edits.
+Removes live toys, re-reads the file and replaces in-memory positions. Useful after manual file edits.
 
 #### `toy_clear_positions()`
-Removes **all** positions for the current map from memory (does not auto-save).
+Removes **all** positions and live toys for the current map (does not auto-save).
 
 **Example — programmatically add a position at player's feet:**
 ```pawn
@@ -504,7 +549,7 @@ Removes all live toys and re-runs the full spawn cycle. Useful after changing `t
 Removes a specific toy entity from the map (without triggering pickup). Cleans up internal tracking.
 
 #### `toy_trigger_pickup(id, ent)`
-Simulates a pickup: fires `toy_on_pickup`, gives rewards, plays sound, removes entity. Useful for:
+Attempts pickup with the same per-map limit: fires `toy_on_pickup`, removes the entity on success, plays sound and fires `toy_on_collected`. Useful for:
 - Alternative interaction (e.g., shooting the toy instead of pressing E)
 - Admin "collect for player" commands
 - Auto-pickup on touch zones
@@ -526,8 +571,8 @@ public cmd_forcegrab(id)
 #### `toy_get_map_file_count()`
 Returns the override value stored in the map's spawn file:
 - `-1` — auto (uses the `toy_count` cvar)
-- `0`  — disabled (no toys spawn on this map)
-- `N`  — exactly N toys
+- `0`  — no random toys (guaranteed points still spawn)
+- `N`  — target number of random toys, limited by eligible points
 
 #### `toy_set_map_file_count(count)`
 Sets the override. Call `toy_save_positions()` afterwards to persist. Used by the admin menu when changing the "Toy count" option.
@@ -559,7 +604,7 @@ toy_rarity_to_str(id, TOY_RARITY_EPIC, rar_str, charsmax(rar_str))
 public plugin_init()
     register_plugin("Toy Money Rewards", "1.0", "author")
 
-public toy_on_pickup(id, ent, toy_idx)
+public toy_on_collected(id, toy_idx)
 {
     new rarity = toy_get_rarity(toy_idx)
     new money
@@ -628,7 +673,7 @@ Adventures Toy System — модульная система плагинов д�
 | CVar | По умолчанию | Описание |
 |---|---|---|
 | `toy_enabled` | `1` | Включить/выключить всю систему |
-| `toy_count` | `5` | Количество игрушек на карте по умолчанию (если нет переопределения) |
+| `toy_count` | `5` | Количество случайных игрушек (если нет переопределения); гарантированные добавляются отдельно |
 | `toy_logging` | `0` | Включить запись отладочного лога в `logs/toy_system.log` |
 | `toy_hide_dead` | `1` | Скрывать игрушки от мёртвых игроков и наблюдателей |
 | `toy_use_range` | `40` | Максимальная дистанция (единицы) для подбора игрушки |
@@ -649,7 +694,7 @@ Adventures Toy System — модульная система плагинов д�
 | Команда | Описание |
 |---|---|
 | `say /toys` | Открыть меню управления игрушками (требует флаг `toy_admin_flags`) |
-| `amx_toys_menu` | То же самое, из консоли сервера или RCON |
+| `amx_toys_menu` | То же самое, из клиентской консоли игрока |
 
 ---
 
@@ -664,7 +709,7 @@ Adventures Toy System — модульная система плагинов д�
 - **Управление позициями** — список всех позиций; клик = телепорт, затем редактирование/удаление/привязка
 - **Переспавнить игрушки** — убрать все текущие игрушки и заспавнить новый набор
 - **Удалить все позиции** — удалить ВСЕ позиции для текущей карты (с подтверждением)
-- **Количество игрушек** — задать сколько игрушек спавнится на этой карте (авто / выкл / 1–N); автосохранение через 2 секунды после изменения
+- **Случайных игрушек** — задать количество случайных игрушек на карте (авто / 0 / 1–N); автосохранение через 2 секунды после изменения
 
 ### Режим размещения
 
@@ -674,20 +719,22 @@ Adventures Toy System — модульная система плагинов д�
 - `MOUSE1` / `MOUSE2` — вращение модели влево/вправо (по оси Yaw)
 - При первоначальном размещении модель автоматически разворачивается лицом к игроку (+180°)
 - В меню размещения:
-  - **Сохранить позицию** — подтвердить и выбрать конкретную игрушку или Случайную
+  - **Появление: Случайное / Гарантированное** — выбрать участие точки в случайном выборе или обязательный спавн
+  - **Сохранить позицию** — подтвердить размещение; редкость выбирается отдельно
   - **Отмена** — выйти без сохранения
 
 ### Визуализация
 
 - Лазерные лучи (голубые) показывают все сохранённые позиции на карте
-- В HUD отображается номер позиции, координаты, угол и привязанная игрушка
+- В HUD отображается номер позиции, координаты, угол, редкость и тип появления
 - При Случайной привязке модель меняется каждые 3 секунды (учитываются skin/body из конфига)
 
 ### Редактирование позиции
 
 В меню **Управление позициями**, кликнув по позиции:
 
-- **Игрушка: [название] (изменить)** / **Игрушка: Случайная (привязать)** — сменить привязку
+- **Редкость** — сменить привязку точки к редкости
+- **Появление: Случайное / Гарантированное** — сменить тип; применяется при загрузке карты или ручном переспавне
 - **Переместить** — заново войти в режим размещения для сдвига позиции
 - **Удалить позицию** — удалить с подтверждением
 
@@ -755,11 +802,38 @@ Adventures Toy System — модульная система плагинов д�
 // Необязательно: переопределить количество игрушек для конкретной карты
 count 3
 
-// Формат: X Y Z Yaw [индекс_игрушки]
-// индекс_игрушки: целое число (0-based) из toy_models.ini, или отсутствует для случайной
+// Формат: X Y Z Yaw [редкость]
+// редкость: common | rare | epic | legendary | any (или отсутствует для любой)
 -512.00 128.00 64.00 90.0
-1024.50 -256.00 0.00 270.0 2
+1024.50 -256.00 0.00 270.0 rare
 ```
+
+#### Случайные и гарантированные точки
+
+Для гарантированной точки после редкости добавляется `spawn=guaranteed`, например:
+`100.0000 200.0000 30.0000 90.0000 any spawn=guaranteed`.
+Если редкость не задана, перед меткой нужно указать `any`. Также читается `spawn=random`.
+Старые строки без метки остаются случайными с сохранением координат и привязки редкости.
+Чтение старых числовых индексов, имён игрушек и строк с меткой сложности сохранено.
+
+Гарантированные точки заполняются первыми и исключены из случайного выбора. Десять
+случайных точек, `count 3` и две гарантированные дают план в пять игрушек. `count 0`
+или `toy_count 0` выключает только случайные игрушки. Гарантированная легендарная точка
+имеет приоритет перед свободным выбором редкости; одновременно разрешена одна легендарная.
+Меню отклоняет гарантированные настройки, невыполнимые с доступными моделями и весами.
+Невозможность спавна гарантированной точки записывается в лог (например, нет модели
+или свободной сущности на сервере).
+
+Спавн выполняется при загрузке карты или вручную, а не каждый раунд. Подобранные игрушки
+сами не восстанавливаются. Переспавн не сбрасывает лимит подбора игрока.
+Сохранение лимита при переподключении требует уникального стабильного SteamID.
+Для общих LAN/BOT и временных ID действует лимит текущего подключения;
+такие ID не записываются как общие ключи разных игроков.
+
+Сохранение выполняется через временный файл; предыдущая версия остаётся в `.ini.bak`.
+Нечитаемый файл, повреждённые координаты/метки типа или превышение 512 точек блокируют
+сохранение, чтобы не затереть неполные данные. Загрузка карты сама не перезаписывает файл.
+
 
 ---
 
@@ -773,7 +847,7 @@ count 3
 | Легендарная (Legendary) | 5 | Золотой |
 
 - Веса настраиваются в секции `"weights"` файла `toy_models.ini`
-- Легендарная — не более **1 штуки на карту** вне зависимости от веса
+- Легендарная — не более **1 живой игрушки одновременно** вне зависимости от веса
 - Shuffle-bag гарантирует разнообразие: каждая модель раритета появится по разу прежде чем начнутся повторения
 
 ---
@@ -862,10 +936,10 @@ while((ent = engfunc(EngFunc_FindEntityByString, ent, "classname", TOY_ENT_CLASS
 - `PLUGIN_HANDLED` — запретить подбор (игрушка останется, награды не выданы)
 
 **Применения:**
-- Реализовать собственную систему очков/денег/опыта (так делает `toy_rewards.amxx`)
+- Реализовать систему очков/денег/опыта через `toy_on_collected` (его использует `toy_rewards.amxx`)
 - Ограничить подбор по команде, VIP-флагу или условию
-- Логировать или транслировать свои события подбора
-- Выдать игровой бонус (HP, броня, оружие)
+- Логировать попытки; объявления об успешном подборе делать в `toy_on_collected`
+- Выдать игровой бонус (HP, броня, оружие) через `toy_on_collected`
 
 **Пример — запретить подбор КТ:**
 ```pawn
@@ -882,7 +956,7 @@ public toy_on_pickup(id, ent, toy_idx)
 
 **Пример — выдача HP при подборе:**
 ```pawn
-public toy_on_pickup(id, ent, toy_idx)
+public toy_on_collected(id, toy_idx)
 {
     new rarity = toy_get_rarity(toy_idx)
     new hp = (rarity == TOY_RARITY_LEGENDARY) ? 100 : 25
@@ -890,6 +964,16 @@ public toy_on_pickup(id, ent, toy_idx)
     return PLUGIN_CONTINUE
 }
 ```
+
+---
+
+#### `toy_on_collected(id, toy_idx)`
+
+Уведомление после успешного подбора и удаления сущности (`ET_IGNORE`); возвращаемое
+значение уже не отменяет подбор. Награды выдаются здесь, а не в `toy_on_pickup`,
+поскольку другой обработчик предварительной проверки может запретить попытку.
+В ветке `dq` сохранена интеграция `dqstatsx_sql`; начисление перенесено на это событие.
+При переходе на этот обработчик обновляйте ядро, подбор и награды вместе.
 
 ---
 
@@ -993,36 +1077,45 @@ client_print(id, print_chat, "На карте ещё спрятано %d игр�
 
 ---
 
+### Нативы — Тип появления
+
+`TOY_SPAWN_RANDOM` = 0; `TOY_SPAWN_GUARANTEED` = 1. Тип и редкость независимы.
+
+- `toy_get_pos_mode(pos_idx)` — тип точки либо -1 при неверном индексе.
+- `toy_get_pos_count_by_mode(mode)` — количество сохранённых точек этого типа.
+- `toy_can_set_position(rarity, mode, exclude_pos = -1)` — проверка моделей/весов и лимита легендарных; при редактировании исключить свою точку.
+- `toy_set_pos_mode(pos_idx, mode)` — смена типа в памяти, результат 1/0; сохранение отдельным вызовом.
+
 ### Нативы — Управление позициями
 
-Позиция — это точка спавна, расставленная админом. Каждая имеет origin, yaw и опциональную привязку к типу игрушки.
+Позиция — это точка спавна, расставленная админом. Каждая имеет origin, yaw, привязку к редкости и тип появления.
 
-#### `toy_get_pos_data(pos_idx, Float:origin[3], &Float:yaw, &bound_toy_idx)`
+#### `toy_get_pos_data(pos_idx, Float:origin[3], &Float:yaw, &bound_rarity)`
 Читает данные позиции по индексу.
 - `origin` заполняется XYZ
 - `yaw` заполняется углом поворота по оси Y
-- `bound_toy_idx` = `-1` если случайная, иначе индекс типа игрушки
+- `bound_rarity` = `TOY_RARITY_ANY` (−1) для любой редкости, иначе `TOY_RARITY_*`
 
 Возвращает `1` при успехе, `0` если `pos_idx` вне диапазона.
 
-#### `toy_add_position(const Float:origin[3], Float:yaw, bound_toy_idx = -1)`
-Создаёт новую позицию в памяти. Возвращает `pos_idx` или `-1` если лимит исчерпан (макс 512).  
+#### `toy_add_position(const Float:origin[3], Float:yaw, bound_rarity = TOY_RARITY_ANY, spawn_mode = TOY_SPAWN_RANDOM)`
+Создаёт новую позицию в памяти. Возвращает `pos_idx` или `-1` если лимит исчерпан (макс 512) либо гарантированная настройка невыполнима.
 **Не сохраняет автоматически** — после пакета изменений вызовите `toy_save_positions()`.
 
 #### `toy_remove_position(pos_idx)`
-Удаляет позицию по индексу. Индексы последующих позиций сдвигаются на 1 вниз.
+Удаляет позицию и её живую игрушку. Индексы последующих позиций сдвигаются на 1 вниз.
 
-#### `toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_toy_idx)`
-Перезаписывает данные существующей позиции.
+#### `toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_rarity, spawn_mode = -1)`
+Перезаписывает данные существующей позиции. Если `spawn_mode` опущен, прежний тип сохраняется; при неверной или невыполнимой гарантированной настройке возвращает 0.
 
 #### `toy_save_positions()`
-Пишет текущие позиции из памяти в `data/toy_spawn/<текущая_карта>.ini`. Вызывать после изменений.
+Пишет текущие позиции из памяти в `data/toy_spawn/<текущая_карта>.ini`. Вызывать после изменений. Возвращает 1 при успехе, 0 при ошибке записи или защите повреждённого файла.
 
 #### `toy_reload_positions()`
-Перечитывает файл и заменяет позиции в памяти. Полезно после ручного редактирования файла.
+Убирает живые игрушки, перечитывает файл и заменяет позиции в памяти. Полезно после ручного редактирования файла.
 
 #### `toy_clear_positions()`
-Удаляет **все** позиции текущей карты из памяти (на диске не сохраняет).
+Удаляет **все** позиции и живые игрушки текущей карты (на диске не сохраняет).
 
 **Пример — программно добавить позицию под ногами игрока:**
 ```pawn
@@ -1056,7 +1149,7 @@ public cmd_addhere(id)
 Удаляет конкретную игрушку с карты (без триггера подбора). Чистит внутренний трекинг.
 
 #### `toy_trigger_pickup(id, ent)`
-Имитирует подбор: вызывает `toy_on_pickup`, выдаёт награды, проигрывает звук, удаляет энтити. Применения:
+Выполняет попытку с тем же лимитом на карту: вызывает `toy_on_pickup`, при успехе удаляет сущность, проигрывает звук и вызывает `toy_on_collected`. Применения:
 - Альтернативный способ взаимодействия (например, расстрелять игрушку вместо нажатия E)
 - Админ-команды "собрать за игрока"
 - Автосбор на зонах касания
@@ -1078,8 +1171,8 @@ public cmd_forcegrab(id)
 #### `toy_get_map_file_count()`
 Возвращает значение, записанное в файле спавна карты:
 - `-1` — авто (используется cvar `toy_count`)
-- `0`  — выключено (игрушки не спавнятся на этой карте)
-- `N`  — ровно N игрушек
+- `0`  — случайные игрушки выключены, гарантированные остаются
+- `N`  — заданное количество случайных игрушек при наличии подходящих точек
 
 #### `toy_set_map_file_count(count)`
 Устанавливает переопределение. Вызовите `toy_save_positions()` для сохранения. Используется в админ-меню при изменении пункта "Количество игрушек".
@@ -1111,7 +1204,7 @@ toy_rarity_to_str(id, TOY_RARITY_EPIC, rar_str, charsmax(rar_str))
 public plugin_init()
     register_plugin("Toy Money Rewards", "1.0", "author")
 
-public toy_on_pickup(id, ent, toy_idx)
+public toy_on_collected(id, toy_idx)
 {
     new rarity = toy_get_rarity(toy_idx)
     new money
@@ -1186,6 +1279,7 @@ Complete list of everything exposed by the header file. / Полный спис�
 | Signature / Сигнатура | ET / Тип | Description / Описание |
 |---|---|---|
 | `toy_on_pickup(id, ent, toy_idx)` | `ET_STOP` | Called on pickup attempt. Return `PLUGIN_HANDLED` to cancel. / Вызов при попытке подбора. `PLUGIN_HANDLED` = отмена. |
+| `toy_on_collected(id, toy_idx)` | `ET_IGNORE` | Accepted pickup only; entity removed. / Только успешный подбор; сущность удалена. |
 | `toy_on_spawned(ent, toy_idx, pos_idx)` | `ET_IGNORE` | Called after a toy entity has been created. / Вызов после создания энтити игрушки. |
 | `toy_on_map_spawn_complete(count)` | `ET_IGNORE` | Called once after all toys spawned on the map. / Однократный вызов после спавна всех игрушек на карте. |
 
@@ -1226,11 +1320,11 @@ Complete list of everything exposed by the header file. / Полный спис�
 
 | Native / Натив | Returns / Возвращает | Description / Описание |
 |---|---|---|
-| `toy_get_pos_data(pos_idx, Float:origin[3], &Float:yaw, &bound_toy_idx)` | `int` | Fills origin/yaw/binding. `1`=ok, `0`=out of range. / Заполняет origin/yaw/привязку. |
-| `toy_add_position(const Float:origin[3], Float:yaw, bound_toy_idx = -1)` | `int` | New `pos_idx` or `-1` if full. / Новый `pos_idx` или `-1`. |
+| `toy_get_pos_data(pos_idx, Float:origin[3], &Float:yaw, &bound_rarity)` | `int` | Fills origin/yaw/binding. `1`=ok, `0`=out of range. / Заполняет origin/yaw/привязку. |
+| `toy_add_position(const Float:origin[3], Float:yaw, bound_rarity = TOY_RARITY_ANY, spawn_mode = TOY_SPAWN_RANDOM)` | `int` | New `pos_idx` or `-1` if full. / Новый `pos_idx` или `-1`. |
 | `toy_remove_position(pos_idx)` | — | Removes position (shifts indices). / Удаляет позицию (сдвиг индексов). |
-| `toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_toy_idx)` | — | Overwrites position data. / Перезаписывает позицию. |
-| `toy_save_positions()` | — | Writes to disk. / Пишет на диск. |
+| `toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_rarity, spawn_mode = -1)` | — | Overwrites position data. / Перезаписывает позицию. |
+| `toy_save_positions()` | `int` | Saves with backup; 1 success / 0 failure. / Сохраняет с резервной копией; 1 успех / 0 ошибка. |
 | `toy_reload_positions()` | — | Re-reads from disk. / Перечитывает с диска. |
 | `toy_clear_positions()` | — | Clears all from memory. / Очищает всё из памяти. |
 
@@ -1247,7 +1341,7 @@ Complete list of everything exposed by the header file. / Полный спис�
 
 | Native / Натив | Returns / Возвращает | Description / Описание |
 |---|---|---|
-| `toy_get_map_file_count()` | `int` | `-1` auto / `0` off / `N` exact. / `-1` авто / `0` выкл / `N` точно. |
+| `toy_get_map_file_count()` | `int` | `-1` auto / `0` random off / `N` random target. Guaranteed points are additional. / Только случайное количество; гарантированные отдельно. |
 | `toy_set_map_file_count(count)` | — | Sets the override (call save after). / Устанавливает (затем save). |
 
 ---
@@ -1265,7 +1359,7 @@ Complete list of everything exposed by the header file. / Полный спис�
 | Goal / Цель | Hook / Call — Хук / вызов |
 |---|---|
 | Block pickup under condition / Заблокировать подбор | `toy_on_pickup` → `return PLUGIN_HANDLED` |
-| Add custom rewards / Свои награды | `toy_on_pickup` + `toy_get_rarity` |
+| Add custom rewards / Свои награды | `toy_on_collected` + `toy_get_rarity` |
 | Visual effect on spawn / Эффект при спавне | `toy_on_spawned` + `set_rendering` |
 | Start map-wide timer / Таймер на карту | `toy_on_map_spawn_complete` |
 | Periodic "X toys left" / Периодический анонс | `toy_get_spawned_count` + `set_task` |
