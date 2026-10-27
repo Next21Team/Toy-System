@@ -20,8 +20,8 @@
 #define ENT_VIS         "toy_admin_vis"
 
 #define HUD_PLACE_CH    4
-#define HUD_VIS_CH      5
-#define HUD_BEAM_CH     6
+#define HUD_VIS_CH      1
+#define HUD_BEAM_CH     2
 
 #define TASK_PLACE      1000
 #define TASK_CYCLE      3000
@@ -29,6 +29,7 @@
 #define TASK_VIS_CYCLE  9999
 #define TASK_BEAMS      4000
 #define TASK_BEAM_HUD   5000
+#define TASK_COUNT_SAVE 6000
 
 #define OFFSET_NEXTATTACK  83
 #define OFFSET_LINUX       5
@@ -39,6 +40,7 @@
 new bool:g_placing[33]
 new bool:g_is_relocate[33]
 new g_place_bound_rarity[33]
+new g_place_spawn_mode[33]
 new Float:g_place_hit[33][3]
 new Float:g_place_yaw[33]
 new g_preview_ent[33]
@@ -59,7 +61,9 @@ new g_sprite_beam
 new g_edit_pos_idx[33]
 new g_toy_select_mode[33]
 
-new g_pending_count[33]
+new bool:g_count_dirty
+new g_positions_revision
+new g_menu_revision[33]
 
 new cvar_admin_flags
 new cvar_toy_count
@@ -73,7 +77,7 @@ public plugin_init()
 {
     register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR)
 
-    arrayset(g_pending_count, -2, sizeof(g_pending_count))
+    arrayset(g_edit_pos_idx, -1, sizeof(g_edit_pos_idx))
 
     register_dictionary("toy_system.txt")
 
@@ -93,9 +97,7 @@ public plugin_init()
 
 public client_disconnected(id, bool:drop, message[], maxlen)
 {
-    if(g_pending_count[id] > -2)
-        save_pending_count(id)
-    g_pending_count[id] = -2
+    save_pending_count(id)
 
     if(g_placing[id])
         exit_placement_mode(id, false)
@@ -105,10 +107,19 @@ public client_disconnected(id, bool:drop, message[], maxlen)
 
     if(g_beam_view[id])
         stop_beam_view(id)
+    remove_task(id)
+    g_edit_pos_idx[id] = -1
+}
+
+
+public plugin_end()
+{
+    save_pending_count(0)
 }
 
 bool:is_admin(id)
 {
+    if(id < 1 || id > 32 || !is_user_connected(id)) return false
     new flagstr[16]
     get_pcvar_string(cvar_admin_flags, flagstr, charsmax(flagstr))
     return bool:(get_user_flags(id) & read_flags(flagstr))
@@ -116,20 +127,21 @@ bool:is_admin(id)
 
 save_pending_count(id)
 {
-    remove_task(id + 5000)
-    if(g_pending_count[id] <= -2) return
-    toy_set_map_file_count(g_pending_count[id])
-    toy_save_positions()
+    remove_task(TASK_COUNT_SAVE)
+    if(!g_count_dirty) return
+    if(toy_save_positions()) g_count_dirty = false
+    else if(is_user_connected(id))
+        client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
 }
 
-public task_autosave_count(taskid)
+public task_autosave_count()
 {
-    save_pending_count(taskid - 5000)
+    save_pending_count(0)
 }
 
 format_count_item(id, buf[], buflen)
 {
-    new pc = g_pending_count[id]
+    new pc = toy_get_map_file_count()
     if(pc < 0)
         formatex(buf, buflen, "%L", id, "TOY_MENU_COUNT_AUTO", get_pcvar_num(cvar_toy_count))
     else if(pc == 0)
@@ -228,7 +240,7 @@ create_vis_entities()
         {
             // Preview model — первая игрушка этого тира (fallback к cycle).
             toy_idx = first_toy_of_rarity(bound_rarity)
-            if(toy_idx < 0) toy_idx = g_vis_cycle_idx % type_count
+            if(toy_idx < 0) continue
         }
         else
             toy_idx = g_vis_cycle_idx % type_count
@@ -353,7 +365,11 @@ update_preview_model(id)
     {
         // Binding тира → показываем первую игрушку этого тира как репрезентатив
         toy_idx = first_toy_of_rarity(g_place_bound_rarity[id])
-        if(toy_idx < 0) toy_idx = g_preview_model_idx[id] % type_count
+        if(toy_idx < 0)
+        {
+            set_pev(g_preview_ent[id], pev_effects, EF_NODRAW)
+            return
+        }
     }
     else
         toy_idx = g_preview_model_idx[id] % type_count
@@ -363,6 +379,7 @@ update_preview_model(id)
 
     if(model[0])
     {
+        set_pev(g_preview_ent[id], pev_effects, 0)
         engfunc(EngFunc_SetModel, g_preview_ent[id], model)
         set_pev(g_preview_ent[id], pev_body, toy_get_body(toy_idx))
         set_pev(g_preview_ent[id], pev_skin, toy_get_skin(toy_idx))
@@ -373,11 +390,18 @@ forward show_placement_menu(id);
 
 exit_placement_mode(id, bool:save)
 {
+    if(save && is_user_alive(id) && (!g_is_relocate[id] || g_menu_revision[id] == g_positions_revision)
+        && !toy_can_set_position(g_place_bound_rarity[id], g_place_spawn_mode[id], g_is_relocate[id] ? g_edit_pos_idx[id] : -1))
+    {
+        client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+        show_placement_menu(id)
+        return
+    }
     g_placing[id] = false
     remove_task(id + TASK_PLACE)
     remove_task(id + TASK_CYCLE)
 
-    set_pdata_float(id, OFFSET_NEXTATTACK, 0.0, OFFSET_LINUX)
+    if(is_user_connected(id)) set_pdata_float(id, OFFSET_NEXTATTACK, 0.0, OFFSET_LINUX)
 
     if(pev_valid(g_preview_ent[id]))
     {
@@ -385,6 +409,12 @@ exit_placement_mode(id, bool:save)
         g_preview_ent[id] = 0
     }
 
+    if(save && !is_user_alive(id)) save = false
+    if(save && g_is_relocate[id] && g_menu_revision[id] != g_positions_revision)
+    {
+        client_print(id, print_chat, "%L", id, "TOY_ADM_STALE_POSITION")
+        save = false
+    }
     if(save)
     {
         new Float:origin[3]
@@ -396,16 +426,27 @@ exit_placement_mode(id, bool:save)
         {
             new pos_idx = g_edit_pos_idx[id]
             new Float:dummy[3], Float:dummy_yaw, orig_bound
-            toy_get_pos_data(pos_idx, dummy, dummy_yaw, orig_bound)
-            toy_update_position(pos_idx, origin, g_place_yaw[id], orig_bound)
-            toy_save_positions()
+            if(!toy_get_pos_data(pos_idx, dummy, dummy_yaw, orig_bound)) return
+            if(!toy_update_position(pos_idx, origin, g_place_yaw[id], orig_bound, g_place_spawn_mode[id]))
+            {
+                client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+                set_task(0.15, "task_reopen_main", id)
+                return
+            }
+            if(!toy_save_positions()) client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
             refresh_vis_entities()
             client_print(id, print_chat, "%L", id, "TOY_ADM_POS_MOVED", pos_idx + 1)
         }
         else
         {
-            new new_idx = toy_add_position(origin, g_place_yaw[id], g_place_bound_rarity[id])
-            toy_save_positions()
+            new new_idx = toy_add_position(origin, g_place_yaw[id], g_place_bound_rarity[id], g_place_spawn_mode[id])
+            if(new_idx < 0)
+            {
+                client_print(id, print_chat, "%L", id, "TOY_ADM_POSITION_FULL")
+                set_task(0.15, "task_reopen_main", id)
+                return
+            }
+            if(!toy_save_positions()) client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
             refresh_vis_entities()
             client_print(id, print_chat, "%L", id, "TOY_ADM_POS_ADDED", new_idx + 1)
         }
@@ -416,11 +457,19 @@ exit_placement_mode(id, bool:save)
     }
 
     g_is_relocate[id] = false
-    set_task(0.15, "task_reopen_main", id)
+    if(is_user_connected(id)) set_task(0.15, "task_reopen_main", id)
 }
 
 enter_placement_mode(id)
 {
+    if(!is_user_alive(id))
+    {
+        client_print(id, print_chat, "%L", id, "TOY_ADM_ALIVE_REQUIRED")
+        return
+    }
+    if(g_placing[id]) exit_placement_mode(id, false)
+    remove_task(id)
+    g_menu_revision[id] = g_positions_revision
     new type_count = toy_get_type_count()
     if(type_count <= 0)
     {
@@ -431,6 +480,7 @@ enter_placement_mode(id)
 
     g_is_relocate[id]       = false
     g_place_bound_rarity[id]   = -1
+    g_place_spawn_mode[id] = TOY_SPAWN_RANDOM
     g_preview_model_idx[id] = 0
     g_place_last_rotate[id] = 0.0
 
@@ -440,7 +490,10 @@ enter_placement_mode(id)
     if(g_place_yaw[id] >= 360.0) g_place_yaw[id] -= 360.0
 
     new model[MAX_MODEL_LEN]
-    toy_get_model(0, model, charsmax(model))
+    new first = first_valid_toy()
+    if(first < 0) { client_print(id, print_chat, "%L", id, "TOY_ADM_NO_MODELS"); return; }
+    g_preview_model_idx[id] = first
+    toy_get_model(first, model, charsmax(model))
     if(!model[0]) { set_task(0.1, "task_reopen_main", id); return; }
 
     new Float:origin[3]
@@ -451,6 +504,8 @@ enter_placement_mode(id)
 
     g_preview_ent[id] = ent
     g_placing[id]     = true
+    update_preview_model(id)
+    task_placement(id + TASK_PLACE)
 
     set_task(0.05, "task_placement",     id + TASK_PLACE, _, _, "b")
     set_task(3.0,  "task_preview_cycle", id + TASK_CYCLE, _, _, "b")
@@ -460,11 +515,19 @@ enter_placement_mode(id)
 
 enter_placement_mode_relocate(id, pos_idx)
 {
+    if(!is_user_alive(id))
+    {
+        client_print(id, print_chat, "%L", id, "TOY_ADM_ALIVE_REQUIRED")
+        return
+    }
+    if(g_placing[id]) exit_placement_mode(id, false)
+    remove_task(id)
+    g_menu_revision[id] = g_positions_revision
     new type_count = toy_get_type_count()
     if(type_count <= 0) { set_task(0.1, "task_reopen_main", id); return; }
 
     new Float:dummy[3], Float:cur_yaw, bound_rarity
-    toy_get_pos_data(pos_idx, dummy, cur_yaw, bound_rarity)
+    if(!toy_get_pos_data(pos_idx, dummy, cur_yaw, bound_rarity)) return
 
     g_edit_pos_idx[id]      = pos_idx
     g_is_relocate[id]       = true
@@ -472,11 +535,13 @@ enter_placement_mode_relocate(id, pos_idx)
     g_place_last_rotate[id] = 0.0
     g_place_yaw[id]         = cur_yaw
     g_place_bound_rarity[id]= bound_rarity
+    g_place_spawn_mode[id] = toy_get_pos_mode(pos_idx)
 
     // Для preview берём первую игрушку тира (если тир задан) или модель[0].
     new model[MAX_MODEL_LEN]
     new preview_toy = (bound_rarity >= 0) ? first_toy_of_rarity(bound_rarity) : 0
-    if(preview_toy < 0) preview_toy = 0
+    if(preview_toy < 0) preview_toy = first_valid_toy()
+    if(preview_toy < 0) { client_print(id, print_chat, "%L", id, "TOY_ADM_NO_MODELS"); return; }
     toy_get_model(preview_toy, model, charsmax(model))
     if(!model[0]) { set_task(0.1, "task_reopen_main", id); return; }
 
@@ -488,6 +553,8 @@ enter_placement_mode_relocate(id, pos_idx)
 
     g_preview_ent[id] = ent
     g_placing[id]     = true
+    update_preview_model(id)
+    task_placement(id + TASK_PLACE)
 
     set_task(0.05, "task_placement", id + TASK_PLACE, _, _, "b")
     if(g_place_bound_rarity[id] < 0)
@@ -498,14 +565,16 @@ enter_placement_mode_relocate(id, pos_idx)
 
 show_main_menu(id)
 {
-    if(g_pending_count[id] <= -2)
-        g_pending_count[id] = toy_get_map_file_count()
-
-    new pos_count   = toy_get_pos_count()
+    new random_count = toy_get_pos_count_by_mode(TOY_SPAWN_RANDOM)
+    new guaranteed_count = toy_get_pos_count_by_mode(TOY_SPAWN_GUARANTEED)
+    new wanted = toy_get_map_file_count()
+    if(wanted < 0) wanted = get_pcvar_num(cvar_toy_count)
+    wanted = clamp(wanted, 0, random_count)
+    new planned = get_cvar_num("toy_enabled") ? wanted + guaranteed_count : 0
     new spawn_count = toy_get_spawned_count()
 
-    new title[96]
-    formatex(title, charsmax(title), "%L", id, "TOY_MENU_MAIN_TITLE", pos_count, spawn_count)
+    new title[256]
+    formatex(title, charsmax(title), "%L", id, "TOY_MENU_MAIN_TITLE", random_count, guaranteed_count, planned, spawn_count)
 
     new menu = menu_create(title, "menu_main")
 
@@ -539,6 +608,11 @@ show_placement_menu(id)
     formatex(title, charsmax(title), "%L", id, "TOY_MENU_PLACE_TITLE")
     new menu = menu_create(title, "menu_placement")
 
+    new mode_str[48]
+    toy_spawn_mode_to_str(id, g_place_spawn_mode[id], mode_str, charsmax(mode_str))
+    formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_SPAWN_MODE", mode_str)
+    menu_additem(menu, buf, "4")
+
     formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_SAVE_POS")
     menu_additem(menu, buf, "2")
 
@@ -561,6 +635,7 @@ show_placement_menu(id)
 
 show_toy_select_menu(id, mode)
 {
+    g_menu_revision[id] = g_positions_revision
     g_toy_select_mode[id] = mode
 
     new title[64]
@@ -582,7 +657,7 @@ show_toy_select_menu(id, mode)
         new buf[96]
         formatex(buf, charsmax(buf), "%s%s", rar_str, count_str)
         num_to_str(r, info, charsmax(info))
-        menu_additem(menu, buf, info)
+        menu_additem(menu, buf, info, 0, cnt ? -1 : menu_makecallback("menu_disabled"))
     }
 
     menu_setprop(menu, MPROP_EXIT, MEXIT_ALL)
@@ -596,7 +671,11 @@ count_toys_of_rarity_admin(rarity)
     new count = toy_get_type_count()
     for(new i = 0; i < count; i++)
         if(toy_get_rarity(i) == rarity)
-            n++
+        {
+            new model[MAX_MODEL_LEN]
+            toy_get_model(i, model, charsmax(model))
+            if(model[0]) n++
+        }
     return n
 }
 
@@ -607,12 +686,17 @@ first_toy_of_rarity(rarity)
     new count = toy_get_type_count()
     for(new i = 0; i < count; i++)
         if(toy_get_rarity(i) == rarity)
-            return i
+        {
+            new model[MAX_MODEL_LEN]
+            toy_get_model(i, model, charsmax(model))
+            if(model[0]) return i
+        }
     return -1
 }
 
 show_pos_list(id)
 {
+    g_menu_revision[id] = g_positions_revision
     new count = toy_get_pos_count()
     new pl_title[80], pl_empty[64]
     formatex(pl_title, charsmax(pl_title), "%L", id, "TOY_MENU_POS_LIST_TITLE")
@@ -626,15 +710,16 @@ show_pos_list(id)
         new Float:origin[3], Float:yaw, bound_rarity
         toy_get_pos_data(i, origin, yaw, bound_rarity)
 
-        new buf[96], idata[8]
+        new buf[144], idata[8], mode_label[32]
+        formatex(mode_label, charsmax(mode_label), "%L", id, toy_get_pos_mode(i) == TOY_SPAWN_GUARANTEED ? "TOY_MODE_SHORT_GUARANTEED" : "TOY_MODE_SHORT_RANDOM")
         if(bound_rarity >= 0)
         {
             new rar_str[32]
             toy_rarity_to_str(id, bound_rarity, rar_str, charsmax(rar_str))
-            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_BOUND", i + 1, rar_str)
+            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_BOUND", i + 1, mode_label, rar_str)
         }
         else
-            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_RANDOM", i + 1)
+            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_RANDOM", i + 1, mode_label)
 
         num_to_str(i, idata, charsmax(idata))
         menu_additem(menu, buf, idata)
@@ -657,12 +742,18 @@ show_pos_list(id)
 
 show_edit_pos_menu(id, pos_idx)
 {
+    g_menu_revision[id] = g_positions_revision
     new Float:origin[3], Float:yaw, bound_rarity
-    toy_get_pos_data(pos_idx, origin, yaw, bound_rarity)
+    if(!toy_get_pos_data(pos_idx, origin, yaw, bound_rarity)) { show_main_menu(id); return; }
 
     new title[80], buf[96]
     formatex(title, charsmax(title), "%L", id, "TOY_MENU_EDIT_TITLE", pos_idx + 1)
     new menu = menu_create(title, "menu_edit_pos")
+
+    new mode_str[48]
+    toy_spawn_mode_to_str(id, toy_get_pos_mode(pos_idx), mode_str, charsmax(mode_str))
+    formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_SPAWN_MODE", mode_str)
+    menu_additem(menu, buf, "5")
 
     if(bound_rarity >= 0)
     {
@@ -685,6 +776,7 @@ show_edit_pos_menu(id, pos_idx)
 
 show_confirm_delete(id, pos_idx)
 {
+    g_menu_revision[id] = g_positions_revision
     new title[64], buf[32]
     formatex(title, charsmax(title), "%L", id, "TOY_MENU_DEL_TITLE", pos_idx + 1)
     new menu = menu_create(title, "menu_confirm_delete")
@@ -698,6 +790,7 @@ show_confirm_delete(id, pos_idx)
 
 show_confirm_delete_all(id)
 {
+    g_menu_revision[id] = g_positions_revision
     new title[64], buf[32]
     formatex(title, charsmax(title), "%L", id, "TOY_MENU_DEL_ALL_TITLE", toy_get_pos_count())
     new menu = menu_create(title, "menu_confirm_delete_all")
@@ -711,18 +804,27 @@ show_confirm_delete_all(id)
 
 public cmd_toys_menu(id)
 {
+    if(id == 0)
+    {
+        server_print("Toy admin menu requires an in-game player: say /toys")
+        return PLUGIN_HANDLED
+    }
     if(!is_admin(id))
     {
         client_print(id, print_chat, "%L", id, "TOY_ADM_NO_ACCESS")
         return PLUGIN_HANDLED
     }
+    if(g_placing[id]) exit_placement_mode(id, false)
+    remove_task(id)
     show_main_menu(id)
     return PLUGIN_HANDLED
 }
 
 public menu_main(id, menu, item)
 {
-    if(item == MENU_EXIT)
+    if(item < MENU_EXIT) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0)
     {
         save_pending_count(id)
         menu_destroy(menu)
@@ -752,16 +854,18 @@ public menu_main(id, menu, item)
         }
         case 4:
         {
-            new pc = g_pending_count[id]
+            new pc = toy_get_map_file_count()
             pc++
-            if(pc > 10) pc = -1
-            g_pending_count[id] = pc
-            remove_task(id + 5000)
-            set_task(2.0, "task_autosave_count", id + 5000)
+            if(pc > toy_get_pos_count_by_mode(TOY_SPAWN_RANDOM)) pc = -1
+            toy_set_map_file_count(pc)
+            g_count_dirty = true
+            remove_task(TASK_COUNT_SAVE)
+            set_task(2.0, "task_autosave_count", TASK_COUNT_SAVE)
             show_main_menu(id)
         }
         case 5:
         {
+            save_pending_count(id)
             toy_respawn_all()
             client_print(id, print_chat, "%L", id, "TOY_ADM_RESPAWNED", toy_get_spawned_count())
             set_task(0.2, "task_reopen_main", id)
@@ -783,7 +887,9 @@ public task_reopen_main(id)
 
 public menu_placement(id, menu, item)
 {
-    if(item == MENU_EXIT)
+    if(item < MENU_EXIT) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0)
     {
         menu_destroy(menu)
         if(g_placing[id])
@@ -806,6 +912,14 @@ public menu_placement(id, menu, item)
             else
                 show_toy_select_menu(id, 0)
         }
+        case 4:
+        {
+            new mode = (g_place_spawn_mode[id] == TOY_SPAWN_RANDOM) ? TOY_SPAWN_GUARANTEED : TOY_SPAWN_RANDOM
+            if(toy_can_set_position(g_place_bound_rarity[id], mode, g_is_relocate[id] ? g_edit_pos_idx[id] : -1))
+                g_place_spawn_mode[id] = mode
+            else client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_placement_menu(id)
+        }
         case 2: exit_placement_mode(id, true)
         case 3: exit_placement_mode(id, false)
     }
@@ -814,7 +928,15 @@ public menu_placement(id, menu, item)
 
 public menu_toy_select(id, menu, item)
 {
-    if(item == MENU_EXIT)
+    if(item < MENU_EXIT) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(g_menu_revision[id] != g_positions_revision)
+    {
+        menu_destroy(menu)
+        if(is_admin(id)) show_main_menu(id)
+        return PLUGIN_HANDLED
+    }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0)
     {
         menu_destroy(menu)
         if(g_toy_select_mode[id] == 1)
@@ -831,9 +953,16 @@ public menu_toy_select(id, menu, item)
     menu_destroy(menu)
 
     new toy_idx = str_to_num(data)
+    if(toy_idx >= 0 && count_toys_of_rarity_admin(toy_idx) == 0) return PLUGIN_HANDLED
 
     if(g_toy_select_mode[id] == 0)
     {
+        if(!toy_can_set_position(toy_idx, g_place_spawn_mode[id], g_is_relocate[id] ? g_edit_pos_idx[id] : -1))
+        {
+            client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_placement_menu(id)
+            return PLUGIN_HANDLED
+        }
         g_place_bound_rarity[id] = toy_idx
 
         remove_task(id + TASK_CYCLE)
@@ -842,8 +971,7 @@ public menu_toy_select(id, menu, item)
             g_preview_model_idx[id] = 0
             set_task(3.0, "task_preview_cycle", id + TASK_CYCLE, _, _, "b")
         }
-        else
-            update_preview_model(id)
+        update_preview_model(id)
 
         show_placement_menu(id)
     }
@@ -852,9 +980,14 @@ public menu_toy_select(id, menu, item)
         // toy_idx — это теперь rarity (из меню выбора тира): -1..3
         new pos_idx = g_edit_pos_idx[id]
         new Float:origin[3], Float:yaw, bound_rarity
-        toy_get_pos_data(pos_idx, origin, yaw, bound_rarity)
-        toy_update_position(pos_idx, origin, yaw, toy_idx)
-        toy_save_positions()
+        if(!toy_get_pos_data(pos_idx, origin, yaw, bound_rarity)) return PLUGIN_HANDLED
+        if(!toy_update_position(pos_idx, origin, yaw, toy_idx))
+        {
+            client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_edit_pos_menu(id, pos_idx)
+            return PLUGIN_HANDLED
+        }
+        if(!toy_save_positions()) client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
         refresh_vis_entities()
         client_print(id, print_chat, "%L", id, "TOY_ADM_BIND_UPDATED", pos_idx + 1)
         set_task(0.1, "task_show_edit_menu", id)
@@ -864,13 +997,22 @@ public menu_toy_select(id, menu, item)
 
 public task_show_edit_menu(id)
 {
-    if(is_user_connected(id))
-        show_edit_pos_menu(id, g_edit_pos_idx[id])
+    if(!is_admin(id)) return
+    if(g_menu_revision[id] != g_positions_revision) show_main_menu(id)
+    else show_edit_pos_menu(id, g_edit_pos_idx[id])
 }
 
 public menu_pos_list(id, menu, item)
 {
-    if(item == MENU_EXIT)
+    if(item < MENU_EXIT) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(g_menu_revision[id] != g_positions_revision)
+    {
+        menu_destroy(menu)
+        if(is_admin(id)) show_main_menu(id)
+        return PLUGIN_HANDLED
+    }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0)
     {
         menu_destroy(menu)
         stop_beam_view(id)
@@ -886,6 +1028,7 @@ public menu_pos_list(id, menu, item)
     new pos_idx = str_to_num(data)
     if(pos_idx < 0) { show_main_menu(id); return PLUGIN_HANDLED; }
 
+    if(pos_idx >= toy_get_pos_count()) { show_main_menu(id); return PLUGIN_HANDLED; }
     g_edit_pos_idx[id] = pos_idx
     teleport_to_pos(id, pos_idx)
     set_task(0.2, "task_show_edit_menu", id)
@@ -894,7 +1037,15 @@ public menu_pos_list(id, menu, item)
 
 public menu_edit_pos(id, menu, item)
 {
-    if(item == MENU_EXIT) { menu_destroy(menu); show_pos_list(id); return PLUGIN_HANDLED; }
+    if(item < MENU_EXIT) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(g_menu_revision[id] != g_positions_revision)
+    {
+        menu_destroy(menu)
+        if(is_admin(id)) show_main_menu(id)
+        return PLUGIN_HANDLED
+    }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0) { menu_destroy(menu); show_pos_list(id); return PLUGIN_HANDLED; }
 
     new data[4], iname[64], acc, cb
     menu_item_getinfo(menu, item, acc, data, charsmax(data), iname, charsmax(iname), cb)
@@ -904,6 +1055,20 @@ public menu_edit_pos(id, menu, item)
 
     switch(str_to_num(data))
     {
+        case 5:
+        {
+            new old_mode = toy_get_pos_mode(pos_idx)
+            if(old_mode < 0) { show_main_menu(id); return PLUGIN_HANDLED; }
+            new mode = (old_mode == TOY_SPAWN_RANDOM) ? TOY_SPAWN_GUARANTEED : TOY_SPAWN_RANDOM
+            if(toy_set_pos_mode(pos_idx, mode))
+            {
+                if(!toy_save_positions()) client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
+                refresh_vis_entities()
+                client_print(id, print_chat, "%L", id, "TOY_ADM_MODE_UPDATED")
+            }
+            else client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_edit_pos_menu(id, pos_idx)
+        }
         case 2: show_toy_select_menu(id, 1)
         case 3: enter_placement_mode_relocate(id, pos_idx)
         case 4: show_confirm_delete(id, pos_idx)
@@ -913,6 +1078,14 @@ public menu_edit_pos(id, menu, item)
 
 public menu_confirm_delete(id, menu, item)
 {
+    if(g_menu_revision[id] != g_positions_revision)
+    {
+        menu_destroy(menu)
+        if(is_admin(id)) show_main_menu(id)
+        return PLUGIN_HANDLED
+    }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0) { menu_destroy(menu); return PLUGIN_HANDLED; }
     new data[4], iname[64], acc, cb
     menu_item_getinfo(menu, item, acc, data, charsmax(data), iname, charsmax(iname), cb)
     menu_destroy(menu)
@@ -920,8 +1093,9 @@ public menu_confirm_delete(id, menu, item)
     if(str_to_num(data) == 1)
     {
         new pos_idx = g_edit_pos_idx[id]
-        toy_remove_position(pos_idx)
-        toy_save_positions()
+        if(!toy_remove_position(pos_idx)) return PLUGIN_HANDLED
+        g_positions_revision++
+        if(!toy_save_positions()) client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
         refresh_vis_entities()
         client_print(id, print_chat, "%L", id, "TOY_ADM_POS_DELETED", pos_idx + 1)
         set_task(0.1, "task_reopen_main", id)
@@ -934,6 +1108,14 @@ public menu_confirm_delete(id, menu, item)
 
 public menu_confirm_delete_all(id, menu, item)
 {
+    if(g_menu_revision[id] != g_positions_revision)
+    {
+        menu_destroy(menu)
+        if(is_admin(id)) show_main_menu(id)
+        return PLUGIN_HANDLED
+    }
+    if(!is_admin(id)) { menu_destroy(menu); return PLUGIN_HANDLED; }
+    if(item < 0) { menu_destroy(menu); return PLUGIN_HANDLED; }
     new data[4], iname[64], acc, cb
     menu_item_getinfo(menu, item, acc, data, charsmax(data), iname, charsmax(iname), cb)
     menu_destroy(menu)
@@ -941,7 +1123,8 @@ public menu_confirm_delete_all(id, menu, item)
     if(str_to_num(data) == 1)
     {
         toy_clear_positions()
-        toy_save_positions()
+        g_positions_revision++
+        if(!toy_save_positions()) client_print(id, print_chat, "%L", id, "TOY_ADM_SAVE_FAILED")
         refresh_vis_entities()
         client_print(id, print_chat, "%L", id, "TOY_ADM_ALL_DELETED")
     }
@@ -983,13 +1166,13 @@ public task_placement(taskid)
 {
     new id = taskid - TASK_PLACE
 
-    if(!is_user_connected(id) || !g_placing[id])
+    if(!is_user_alive(id) || !is_admin(id) || !g_placing[id])
     {
         exit_placement_mode(id, false)
         return
     }
 
-    set_pdata_float(id, OFFSET_NEXTATTACK, get_gametime() + 9999.0, OFFSET_LINUX)
+    set_pdata_float(id, OFFSET_NEXTATTACK, 1.0, OFFSET_LINUX)
 
     new Float:eye[3], Float:viewofs[3]
     pev(id, pev_origin, eye)
@@ -1028,7 +1211,7 @@ public task_placement(taskid)
     new toy_str[MAX_NAME_LEN]
     new type_count = toy_get_type_count()
     if(g_place_bound_rarity[id] >= 0)
-        toy_get_name(g_place_bound_rarity[id], toy_str, charsmax(toy_str))
+        toy_rarity_to_str(id, g_place_bound_rarity[id], toy_str, charsmax(toy_str))
     else if(type_count > 0)
     {
         new idx = g_preview_model_idx[id] % type_count
@@ -1036,9 +1219,10 @@ public task_placement(taskid)
         add(toy_str, charsmax(toy_str), " (авто)")
     }
 
-    new hud_place[192]
+    new hud_place[256], spawn_mode_str[48]
+    toy_spawn_mode_to_str(id, g_place_spawn_mode[id], spawn_mode_str, charsmax(spawn_mode_str))
     formatex(hud_place, charsmax(hud_place), "%L", id, "TOY_HUD_PLACEMENT",
-        hit[0], hit[1], hit[2], g_place_yaw[id], toy_str)
+        hit[0], hit[1], hit[2], g_place_yaw[id], toy_str, spawn_mode_str)
     set_hudmessage(255, 255, 150, 0.55, 0.15, 0, 0.0, 0.5, 0.0, 0.0, HUD_PLACE_CH)
     show_hudmessage(id, "%s", hud_place)
 }
@@ -1151,9 +1335,10 @@ public task_vis_hud(taskid)
     else
         copy(rar_str, charsmax(rar_str), "Любой")
 
-    new hud_vis[192]
+    new hud_vis[256], spawn_mode_str[48]
+    toy_spawn_mode_to_str(id, toy_get_pos_mode(pos_idx), spawn_mode_str, charsmax(spawn_mode_str))
     formatex(hud_vis, charsmax(hud_vis), "%L", id, "TOY_HUD_VIS_POS",
-        pos_idx + 1, origin[0], origin[1], origin[2], yaw, rar_str)
+        pos_idx + 1, origin[0], origin[1], origin[2], yaw, rar_str, spawn_mode_str)
     set_hudmessage(255, 255, 100, -1.0, 0.72, 0, 0.0, 0.5, 0.0, 0.0, HUD_VIS_CH)
     show_hudmessage(id, "%s", hud_vis)
 }
@@ -1233,9 +1418,10 @@ public task_beam_hud(taskid)
     else
         copy(rar_str, charsmax(rar_str), "Любой")
 
-    new hud_beam[192]
+    new hud_beam[256], spawn_mode_str[48]
+    toy_spawn_mode_to_str(id, toy_get_pos_mode(best_pos), spawn_mode_str, charsmax(spawn_mode_str))
     formatex(hud_beam, charsmax(hud_beam), "%L", id, "TOY_HUD_BEAM_POS",
-        best_pos + 1, origin[0], origin[1], origin[2], rar_str)
+        best_pos + 1, origin[0], origin[1], origin[2], rar_str, spawn_mode_str)
     set_hudmessage(255, 220, 80, -1.0, 0.72, 0, 0.0, 0.6, 0.0, 0.0, HUD_BEAM_CH)
     show_hudmessage(id, "%s", hud_beam)
 }
@@ -1245,4 +1431,20 @@ public toy_on_pickup(id, ent, toy_idx)
     if(g_placing[id])
         return PLUGIN_HANDLED
     return PLUGIN_CONTINUE
+}
+
+public menu_disabled(id, menu, item)
+{
+    return ITEM_DISABLED
+}
+
+first_valid_toy()
+{
+    new model[MAX_MODEL_LEN]
+    for(new i = 0; i < toy_get_type_count(); i++)
+    {
+        toy_get_model(i, model, charsmax(model))
+        if(model[0]) return i
+    }
+    return -1
 }

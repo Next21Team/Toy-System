@@ -109,7 +109,7 @@ write_default_rewards_config(const filepath[])
     fclose(f)
 }
 
-public toy_on_pickup(id, ent, toy_idx)
+public toy_on_collected(id, toy_idx)
 {
     new rarity = toy_get_rarity(toy_idx)
 
@@ -128,19 +128,17 @@ public toy_on_pickup(id, ent, toy_idx)
 
 do_announce(id, const toy_name[], rarity, points)
 {
-    new player_name[32]
+    new player_name[32], players[32], count
     get_user_name(id, player_name, charsmax(player_name))
-
-    new rar_str[32]
-    toy_rarity_to_str(LANG_PLAYER, rarity, rar_str, charsmax(rar_str))
-
-    new pts_word[16]
+    get_players(players, count, "ch")
     static const pts_keys[3][] = { "TOY_RWD_PTS_1", "TOY_RWD_PTS_2", "TOY_RWD_PTS_5" }
-    formatex(pts_word, charsmax(pts_word), "%L", LANG_PLAYER, pts_keys[get_pts_form(points)])
-
-    new msg[256]
-    formatex(msg, charsmax(msg), "%L", LANG_PLAYER, "TOY_RWD_FOUND", player_name, toy_name, rar_str, points, pts_word)
-    client_print_color(0, print_team_default, msg)
+    for(new i = 0; i < count; i++)
+    {
+        new receiver = players[i], rar_str[32], pts_word[32]
+        toy_rarity_to_str(receiver, rarity, rar_str, charsmax(rar_str))
+        formatex(pts_word, charsmax(pts_word), "%L", receiver, pts_keys[get_pts_form(points)])
+        client_print_color(receiver, print_team_default, "%L", receiver, "TOY_RWD_FOUND", player_name, toy_name, rar_str, points, pts_word)
+    }
 }
 
 give_points_to_player(id, amount, const toy_name[])
