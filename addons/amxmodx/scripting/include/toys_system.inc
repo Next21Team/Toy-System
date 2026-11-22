@@ -20,6 +20,10 @@
 
 #define TOY_MAX_LEGENDARY_PER_MAP         1
 
+// Тип точки спавна. Не зависит от привязки к редкости.
+#define TOY_SPAWN_RANDOM                0   // участвует в распределении toy_count / count N
+#define TOY_SPAWN_GUARANTEED            1   // заполняется всегда, не расходует count
+
 #define TOY_DEFAULT_PICKUP_SOUND    "items/gunpickup2.wav"
 
 #define TOY_ENT_CLASSNAME           "toy_ent"
@@ -51,11 +55,26 @@ native toy_get_pos_count();
 // pos_data возвращает rarity-биндинг точки спавна (TOY_RARITY_* или TOY_RARITY_ANY).
 native toy_get_pos_data(pos_idx, Float:origin[3], &Float:yaw, &bound_rarity);
 
-native toy_add_position(const Float:origin[3], Float:yaw, bound_rarity = TOY_RARITY_ANY);
+// toy_add_position: тип точки задаётся TOY_SPAWN_RANDOM (по умолчанию) или TOY_SPAWN_GUARANTEED.
+// Возвращает индекс точки или -1 при ошибке (лимит, невалидный тип/редкость, невыполнимая гарантия).
+native toy_add_position(const Float:origin[3], Float:yaw, bound_rarity = TOY_RARITY_ANY, spawn_mode = TOY_SPAWN_RANDOM);
+
+// Тип точки спавна (TOY_SPAWN_*) или -1, если индекс вне диапазона.
+native toy_get_pos_mode(pos_idx);
+
+// Сколько точек с данным типом сохранено на текущей карте.
+native toy_get_pos_count_by_mode(spawn_mode);
+
+// Можно ли поставить точку с такими параметрами. exclude_pos исключает точку из проверки
+// лимита легендарных (нужно при редактировании существующей точки, -1 = не исключать).
+native bool:toy_can_set_position(bound_rarity, spawn_mode, exclude_pos = -1);
+
+// Меняет только тип появления у существующей точки. 1 = успех.
+native toy_set_pos_mode(pos_idx, spawn_mode);
 
 native toy_remove_position(pos_idx);
 
-native toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_rarity);
+native toy_update_position(pos_idx, const Float:origin[3], Float:yaw, bound_rarity, spawn_mode = -1);
 
 native toy_save_positions();
 
