@@ -39,6 +39,7 @@
 new bool:g_placing[33]
 new bool:g_is_relocate[33]
 new g_place_bound_rarity[33]
+new g_place_spawn_mode[33]
 new Float:g_place_hit[33][3]
 new Float:g_place_yaw[33]
 new g_preview_ent[33]
@@ -396,15 +397,32 @@ exit_placement_mode(id, bool:save)
         {
             new pos_idx = g_edit_pos_idx[id]
             new Float:dummy[3], Float:dummy_yaw, orig_bound
-            toy_get_pos_data(pos_idx, dummy, dummy_yaw, orig_bound)
-            toy_update_position(pos_idx, origin, g_place_yaw[id], orig_bound)
+            if(!toy_get_pos_data(pos_idx, dummy, dummy_yaw, orig_bound))
+            {
+                client_print(id, print_chat, "%L", id, "TOY_ADM_STALE_POSITION")
+                g_is_relocate[id] = false
+                set_task(0.15, "task_reopen_main", id)
+                return
+            }
+            if(!toy_update_position(pos_idx, origin, g_place_yaw[id], orig_bound, g_place_spawn_mode[id]))
+            {
+                client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+                set_task(0.15, "task_reopen_main", id)
+                return
+            }
             toy_save_positions()
             refresh_vis_entities()
             client_print(id, print_chat, "%L", id, "TOY_ADM_POS_MOVED", pos_idx + 1)
         }
         else
         {
-            new new_idx = toy_add_position(origin, g_place_yaw[id], g_place_bound_rarity[id])
+            new new_idx = toy_add_position(origin, g_place_yaw[id], g_place_bound_rarity[id], g_place_spawn_mode[id])
+            if(new_idx < 0)
+            {
+                client_print(id, print_chat, "%L", id, "TOY_ADM_POSITION_FULL")
+                set_task(0.15, "task_reopen_main", id)
+                return
+            }
             toy_save_positions()
             refresh_vis_entities()
             client_print(id, print_chat, "%L", id, "TOY_ADM_POS_ADDED", new_idx + 1)
@@ -431,6 +449,7 @@ enter_placement_mode(id)
 
     g_is_relocate[id]       = false
     g_place_bound_rarity[id]   = -1
+    g_place_spawn_mode[id]  = TOY_SPAWN_RANDOM
     g_preview_model_idx[id] = 0
     g_place_last_rotate[id] = 0.0
 
@@ -464,7 +483,12 @@ enter_placement_mode_relocate(id, pos_idx)
     if(type_count <= 0) { set_task(0.1, "task_reopen_main", id); return; }
 
     new Float:dummy[3], Float:cur_yaw, bound_rarity
-    toy_get_pos_data(pos_idx, dummy, cur_yaw, bound_rarity)
+    if(!toy_get_pos_data(pos_idx, dummy, cur_yaw, bound_rarity))
+    {
+        client_print(id, print_chat, "%L", id, "TOY_ADM_STALE_POSITION")
+        set_task(0.1, "task_reopen_main", id)
+        return
+    }
 
     g_edit_pos_idx[id]      = pos_idx
     g_is_relocate[id]       = true
@@ -472,6 +496,8 @@ enter_placement_mode_relocate(id, pos_idx)
     g_place_last_rotate[id] = 0.0
     g_place_yaw[id]         = cur_yaw
     g_place_bound_rarity[id]= bound_rarity
+    g_place_spawn_mode[id]  = toy_get_pos_mode(pos_idx)
+    if(g_place_spawn_mode[id] < 0) g_place_spawn_mode[id] = TOY_SPAWN_RANDOM
 
     // Для preview берём первую игрушку тира (если тир задан) или модель[0].
     new model[MAX_MODEL_LEN]
@@ -502,10 +528,12 @@ show_main_menu(id)
         g_pending_count[id] = toy_get_map_file_count()
 
     new pos_count   = toy_get_pos_count()
+    new random_count     = toy_get_pos_count_by_mode(TOY_SPAWN_RANDOM)
+    new guaranteed_count = toy_get_pos_count_by_mode(TOY_SPAWN_GUARANTEED)
     new spawn_count = toy_get_spawned_count()
 
-    new title[96]
-    formatex(title, charsmax(title), "%L", id, "TOY_MENU_MAIN_TITLE", pos_count, spawn_count)
+    new title[144]
+    formatex(title, charsmax(title), "%L", id, "TOY_MENU_MAIN_TITLE", random_count, guaranteed_count, pos_count, spawn_count)
 
     new menu = menu_create(title, "menu_main")
 
@@ -535,7 +563,7 @@ show_placement_menu(id)
 {
     if(!g_placing[id]) return
 
-    new title[64], buf[96]
+    new title[64], buf[128]
     formatex(title, charsmax(title), "%L", id, "TOY_MENU_PLACE_TITLE")
     new menu = menu_create(title, "menu_placement")
 
@@ -551,6 +579,11 @@ show_placement_menu(id)
     else
         formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_TOY_RANDOM")
     menu_additem(menu, buf, "1")
+
+    new mode_str[48]
+    toy_spawn_mode_to_str(id, g_place_spawn_mode[id], mode_str, charsmax(mode_str))
+    formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_SPAWN_MODE", mode_str)
+    menu_additem(menu, buf, "4")
 
     formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_CANCEL")
     menu_additem(menu, buf, "3")
@@ -582,7 +615,7 @@ show_toy_select_menu(id, mode)
         new buf[96]
         formatex(buf, charsmax(buf), "%s%s", rar_str, count_str)
         num_to_str(r, info, charsmax(info))
-        menu_additem(menu, buf, info)
+        menu_additem(menu, buf, info, 0, cnt ? -1 : menu_makecallback("menu_disabled"))
     }
 
     menu_setprop(menu, MPROP_EXIT, MEXIT_ALL)
@@ -626,15 +659,17 @@ show_pos_list(id)
         new Float:origin[3], Float:yaw, bound_rarity
         toy_get_pos_data(i, origin, yaw, bound_rarity)
 
-        new buf[96], idata[8]
+        new buf[128], idata[8], mode_label[32]
+        formatex(mode_label, charsmax(mode_label), "%L", id,
+            toy_get_pos_mode(i) == TOY_SPAWN_GUARANTEED ? "TOY_MODE_SHORT_GUARANTEED" : "TOY_MODE_SHORT_RANDOM")
         if(bound_rarity >= 0)
         {
             new rar_str[32]
             toy_rarity_to_str(id, bound_rarity, rar_str, charsmax(rar_str))
-            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_BOUND", i + 1, rar_str)
+            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_BOUND", i + 1, mode_label, rar_str)
         }
         else
-            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_RANDOM", i + 1)
+            formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_POS_ITEM_RANDOM", i + 1, mode_label)
 
         num_to_str(i, idata, charsmax(idata))
         menu_additem(menu, buf, idata)
@@ -658,9 +693,13 @@ show_pos_list(id)
 show_edit_pos_menu(id, pos_idx)
 {
     new Float:origin[3], Float:yaw, bound_rarity
-    toy_get_pos_data(pos_idx, origin, yaw, bound_rarity)
+    if(!toy_get_pos_data(pos_idx, origin, yaw, bound_rarity))
+    {
+        show_main_menu(id)
+        return
+    }
 
-    new title[80], buf[96]
+    new title[80], buf[128]
     formatex(title, charsmax(title), "%L", id, "TOY_MENU_EDIT_TITLE", pos_idx + 1)
     new menu = menu_create(title, "menu_edit_pos")
 
@@ -678,6 +717,11 @@ show_edit_pos_menu(id, pos_idx)
     menu_additem(menu, buf, "3")
     formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_EDIT_DELETE")
     menu_additem(menu, buf, "4")
+
+    new mode_str[48]
+    toy_spawn_mode_to_str(id, toy_get_pos_mode(pos_idx), mode_str, charsmax(mode_str))
+    formatex(buf, charsmax(buf), "%L", id, "TOY_MENU_SPAWN_MODE", mode_str)
+    menu_additem(menu, buf, "5")
 
     menu_setprop(menu, MPROP_EXIT, MEXIT_ALL)
     menu_display(id, menu, 0)
@@ -808,6 +852,16 @@ public menu_placement(id, menu, item)
         }
         case 2: exit_placement_mode(id, true)
         case 3: exit_placement_mode(id, false)
+        case 4:
+        {
+            new mode = (g_place_spawn_mode[id] == TOY_SPAWN_RANDOM) ? TOY_SPAWN_GUARANTEED : TOY_SPAWN_RANDOM
+            new exclude = g_is_relocate[id] ? g_edit_pos_idx[id] : -1
+            if(toy_can_set_position(g_place_bound_rarity[id], mode, exclude))
+                g_place_spawn_mode[id] = mode
+            else
+                client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_placement_menu(id)
+        }
     }
     return PLUGIN_HANDLED
 }
@@ -834,6 +888,14 @@ public menu_toy_select(id, menu, item)
 
     if(g_toy_select_mode[id] == 0)
     {
+        new exclude = g_is_relocate[id] ? g_edit_pos_idx[id] : -1
+        if(!toy_can_set_position(toy_idx, g_place_spawn_mode[id], exclude))
+        {
+            client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_placement_menu(id)
+            return PLUGIN_HANDLED
+        }
+
         g_place_bound_rarity[id] = toy_idx
 
         remove_task(id + TASK_CYCLE)
@@ -852,8 +914,18 @@ public menu_toy_select(id, menu, item)
         // toy_idx — это теперь rarity (из меню выбора тира): -1..3
         new pos_idx = g_edit_pos_idx[id]
         new Float:origin[3], Float:yaw, bound_rarity
-        toy_get_pos_data(pos_idx, origin, yaw, bound_rarity)
-        toy_update_position(pos_idx, origin, yaw, toy_idx)
+        if(!toy_get_pos_data(pos_idx, origin, yaw, bound_rarity))
+        {
+            show_main_menu(id)
+            return PLUGIN_HANDLED
+        }
+        // Тип точки сохраняется: меняем только редкость.
+        if(!toy_update_position(pos_idx, origin, yaw, toy_idx))
+        {
+            client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_edit_pos_menu(id, pos_idx)
+            return PLUGIN_HANDLED
+        }
         toy_save_positions()
         refresh_vis_entities()
         client_print(id, print_chat, "%L", id, "TOY_ADM_BIND_UPDATED", pos_idx + 1)
@@ -904,6 +976,22 @@ public menu_edit_pos(id, menu, item)
 
     switch(str_to_num(data))
     {
+        case 5:
+        {
+            new pos_idx = g_edit_pos_idx[id]
+            new old_mode = toy_get_pos_mode(pos_idx)
+            if(old_mode < 0) { show_main_menu(id); return PLUGIN_HANDLED; }
+            new mode = (old_mode == TOY_SPAWN_RANDOM) ? TOY_SPAWN_GUARANTEED : TOY_SPAWN_RANDOM
+            if(toy_set_pos_mode(pos_idx, mode))
+            {
+                toy_save_positions()
+                refresh_vis_entities()
+                client_print(id, print_chat, "%L", id, "TOY_ADM_MODE_UPDATED")
+            }
+            else
+                client_print(id, print_chat, "%L", id, "TOY_ADM_GUARANTEE_INVALID")
+            show_edit_pos_menu(id, pos_idx)
+        }
         case 2: show_toy_select_menu(id, 1)
         case 3: enter_placement_mode_relocate(id, pos_idx)
         case 4: show_confirm_delete(id, pos_idx)
@@ -1036,9 +1124,10 @@ public task_placement(taskid)
         add(toy_str, charsmax(toy_str), " (авто)")
     }
 
-    new hud_place[192]
+    new hud_place[256], mode_str[48]
+    toy_spawn_mode_to_str(id, g_place_spawn_mode[id], mode_str, charsmax(mode_str))
     formatex(hud_place, charsmax(hud_place), "%L", id, "TOY_HUD_PLACEMENT",
-        hit[0], hit[1], hit[2], g_place_yaw[id], toy_str)
+        hit[0], hit[1], hit[2], g_place_yaw[id], toy_str, mode_str)
     set_hudmessage(255, 255, 150, 0.55, 0.15, 0, 0.0, 0.5, 0.0, 0.0, HUD_PLACE_CH)
     show_hudmessage(id, "%s", hud_place)
 }
@@ -1151,9 +1240,10 @@ public task_vis_hud(taskid)
     else
         copy(rar_str, charsmax(rar_str), "Любой")
 
-    new hud_vis[192]
+    new hud_vis[256], mode_str[48]
+    toy_spawn_mode_to_str(id, toy_get_pos_mode(pos_idx), mode_str, charsmax(mode_str))
     formatex(hud_vis, charsmax(hud_vis), "%L", id, "TOY_HUD_VIS_POS",
-        pos_idx + 1, origin[0], origin[1], origin[2], yaw, rar_str)
+        pos_idx + 1, origin[0], origin[1], origin[2], yaw, rar_str, mode_str)
     set_hudmessage(255, 255, 100, -1.0, 0.72, 0, 0.0, 0.5, 0.0, 0.0, HUD_VIS_CH)
     show_hudmessage(id, "%s", hud_vis)
 }
@@ -1233,9 +1323,10 @@ public task_beam_hud(taskid)
     else
         copy(rar_str, charsmax(rar_str), "Любой")
 
-    new hud_beam[192]
+    new hud_beam[256], mode_str[48]
+    toy_spawn_mode_to_str(id, toy_get_pos_mode(best_pos), mode_str, charsmax(mode_str))
     formatex(hud_beam, charsmax(hud_beam), "%L", id, "TOY_HUD_BEAM_POS",
-        best_pos + 1, origin[0], origin[1], origin[2], rar_str)
+        best_pos + 1, origin[0], origin[1], origin[2], rar_str, mode_str)
     set_hudmessage(255, 220, 80, -1.0, 0.72, 0, 0.0, 0.6, 0.0, 0.0, HUD_BEAM_CH)
     show_hudmessage(id, "%s", hud_beam)
 }
@@ -1245,4 +1336,16 @@ public toy_on_pickup(id, ent, toy_idx)
     if(g_placing[id])
         return PLUGIN_HANDLED
     return PLUGIN_CONTINUE
+}
+
+// Человекочитаемое название типа точки для меню и HUD.
+toy_spawn_mode_to_str(id, mode, out[], len)
+{
+    formatex(out, len, "%L", id, (mode == TOY_SPAWN_GUARANTEED) ? "TOY_SPAWN_GUARANTEED" : "TOY_SPAWN_RANDOM")
+}
+
+// menu_makecallback регистрирует новый forward на каждый вызов, поэтому создаём один раз.
+public menu_disabled(id, menu, item)
+{
+    return ITEM_DISABLED
 }

@@ -35,6 +35,8 @@ new Float:g_pos_yaw[MAX_POSITIONS]
 //   0  = common, 1 = rare, 2 = epic, 3 = legendary
 // В ini пишется как строка: common / rare / epic / legendary / any (или пусто).
 new g_pos_bound_rarity[MAX_POSITIONS]
+// Тип точки задаётся независимо от редкости: случайная или гарантированная.
+new g_pos_spawn_mode[MAX_POSITIONS]
 new g_pos_count = 0
 
 new bool:g_is_toy_ent[MAX_EDICTS]
@@ -71,6 +73,11 @@ new g_logfile[192]
 public plugin_natives()
 {
     register_library("toys_system")
+
+    register_native("toy_get_pos_mode",       "native_get_pos_mode",       0)
+    register_native("toy_get_pos_count_by_mode", "native_get_pos_count_by_mode", 0)
+    register_native("toy_can_set_position",   "native_can_set_position",   0)
+    register_native("toy_set_pos_mode",       "native_set_pos_mode",       0)
 
     register_native("toy_get_toy_idx",       "native_get_toy_idx",       0)
     register_native("toy_get_name",          "native_get_name",          0)
@@ -379,14 +386,16 @@ load_positions()
             continue
         }
 
-        new parts[6][MAX_NAME_LEN]
+        new parts[8][MAX_NAME_LEN]
         new n = parse(line,
             parts[0], charsmax(parts[]),
             parts[1], charsmax(parts[]),
             parts[2], charsmax(parts[]),
             parts[3], charsmax(parts[]),
             parts[4], charsmax(parts[]),
-            parts[5], charsmax(parts[]))
+            parts[5], charsmax(parts[]),
+            parts[6], charsmax(parts[]),
+            parts[7], charsmax(parts[]))
 
         if(n < 4) continue
 
@@ -421,6 +430,23 @@ load_positions()
         }
         else
             g_pos_bound_rarity[idx] = -1
+
+        // Метка типа идёт ПОСЛЕ legacy-колонки привязки. Без неё точка считается случайной,
+        // поэтому старые файлы читаются как раньше.
+        g_pos_spawn_mode[idx] = TOY_SPAWN_RANDOM
+        new bool:seen_mode
+        for(new col = bound_col + 1; col < n; col++)
+        {
+            if(parts[col][0] == ';' || parts[col][0] == '/') break
+            new mode = parse_spawn_mode(parts[col])
+            if(mode < 0) continue
+            if(!seen_mode)
+            {
+                g_pos_spawn_mode[idx] = mode
+                seen_mode = true
+            }
+            else log_amx("Duplicate spawn metadata at position %d in %s, ignored", idx + 1, filepath)
+        }
         g_pos_count++
     }
     fclose(f)
@@ -445,9 +471,10 @@ save_positions()
     }
 
     fputs(f, "// Adventures Toy System — позиции карты^n")
-    fputs(f, "// Формат: x y z yaw [rarity]^n")
+    fputs(f, "// Формат: x y z yaw [rarity [spawn=random|spawn=guaranteed]]^n")
     fputs(f, "//   rarity: common | rare | epic | legendary | any (или пусто)^n")
-    fputs(f, "// count N — сколько игрушек спавнить на этой карте (переопределяет toy_count)^n^n")
+    fputs(f, "//   spawn=guaranteed — точка заполняется всегда и не расходует count; без метки — случайная^n")
+    fputs(f, "// count N — число СЛУЧАЙНЫХ игрушек на карте (переопределяет toy_count)^n^n")
 
     if(g_map_count_from_file >= 0) 
     {
@@ -459,13 +486,26 @@ save_positions()
     new i, line[256]
     for(i = 0; i < g_pos_count; i++)
     {
+        new slug[16]
         if(g_pos_bound_rarity[i] >= 0 && g_pos_bound_rarity[i] <= TOY_RARITY_LEGENDARY)
         {
-            new slug[16]
             rarity_to_str(g_pos_bound_rarity[i], slug, charsmax(slug))
-            formatex(line, charsmax(line), "%.4f %.4f %.4f %.4f %s^n",
+            if(g_pos_spawn_mode[i] == TOY_SPAWN_GUARANTEED)
+                formatex(line, charsmax(line), "%.4f %.4f %.4f %.4f %s spawn=guaranteed^n",
+                    g_pos_origin[i][0], g_pos_origin[i][1], g_pos_origin[i][2],
+                    g_pos_yaw[i], slug)
+            else
+                formatex(line, charsmax(line), "%.4f %.4f %.4f %.4f %s^n",
+                    g_pos_origin[i][0], g_pos_origin[i][1], g_pos_origin[i][2],
+                    g_pos_yaw[i], slug)
+        }
+        else if(g_pos_spawn_mode[i] == TOY_SPAWN_GUARANTEED)
+        {
+            // Без rarity-колонки метку всё равно надо записать, иначе точка станет случайной.
+            // "any" — валидный слаг, который читается обратно как «любой тир».
+            formatex(line, charsmax(line), "%.4f %.4f %.4f %.4f any spawn=guaranteed^n",
                 g_pos_origin[i][0], g_pos_origin[i][1], g_pos_origin[i][2],
-                g_pos_yaw[i], slug)
+                g_pos_yaw[i])
         }
         else
         {
@@ -500,26 +540,45 @@ spawn_toys()
     remove_all_toys()
 
     new ret
-    if(!g_pos_count || !g_toy_count || g_map_count_from_file == 0)
+    if(!g_pos_count || !g_toy_count)
     {
         ExecuteForward(g_fwd_map_complete, ret, 0)
         return
     }
 
+    // 1. Гарантированные точки заполняются первыми и не тратят «бюджет» toy_count.
+    //    Легендарные — в первую очередь, иначе ANY-точка займёт единственный слот.
+    new guaranteed_spawned
+    for(new pass = 0; pass < 2; pass++)
+    {
+        for(new pos = 0; pos < g_pos_count; pos++)
+        {
+            if(g_pos_spawn_mode[pos] != TOY_SPAWN_GUARANTEED) continue
+            new bool:legendary = (g_pos_bound_rarity[pos] == TOY_RARITY_LEGENDARY)
+            if((pass == 0) != legendary) continue
+            if(spawn_one_position(pos)) guaranteed_spawned++
+            else log_amx("Guaranteed point #%d could not spawn: check models, rarity weights, legendary cap and entity limit", pos + 1)
+        }
+    }
+
+    // 2. Случайные точки расходуют count N / toy_count.
+    //    count 0 в файле карты — это «ноль случайных игрушек», а не откат к toy_count.
     new wanted
-    if(g_map_count_from_file > 0)
+    if(g_map_count_from_file >= 0)
         wanted = g_map_count_from_file
     else
         wanted = get_pcvar_num(cvar_count)
-    if(wanted <= 0)            wanted = 10
-    if(wanted > g_pos_count)   wanted = g_pos_count
-    if(wanted > MAX_POSITIONS) wanted = MAX_POSITIONS
 
-    new bool:used_pos[MAX_POSITIONS]
-    new avail = g_pos_count
+    new bool:used_pos[MAX_POSITIONS], avail
+    for(new pos = 0; pos < g_pos_count; pos++)
+    {
+        used_pos[pos] = (g_pos_spawn_mode[pos] == TOY_SPAWN_GUARANTEED)
+        if(!used_pos[pos]) avail++
+    }
+    wanted = clamp(wanted, 0, avail)
 
-    new spawned = 0, i
-    for(i = 0; i < wanted && avail > 0; i++)
+    new random_spawned
+    while(random_spawned < wanted && avail > 0)
     {
         new pos_idx = pick_random_unused(used_pos, avail)
         if(pos_idx < 0) break
@@ -527,20 +586,27 @@ spawn_toys()
         used_pos[pos_idx] = true
         avail--
 
-        new toy_idx = resolve_toy_for_position(pos_idx)
-        if(toy_idx < 0 || !g_toy_model[toy_idx][0]) continue
-
-        new ent = do_spawn_entity(toy_idx, pos_idx)
-        if(!ent) continue
-
-        ExecuteForward(g_fwd_spawned, ret, ent, toy_idx, pos_idx)
-
-        spawned++
+        if(spawn_one_position(pos_idx)) random_spawned++
     }
 
-    ExecuteForward(g_fwd_map_complete, ret, spawned)
+    ExecuteForward(g_fwd_map_complete, ret, guaranteed_spawned + random_spawned)
 
-    toy_log("[ToyCore] Spawned: %d (positions available: %d)", spawned, g_pos_count)
+    // toy_log — макрос с %0: многострочный вызов ломает препроцессор, держим одной строкой.
+    toy_log("[ToyCore] Spawned guaranteed=%d/%d random=%d/%d total=%d", guaranteed_spawned, count_positions_by_mode(TOY_SPAWN_GUARANTEED), random_spawned, wanted, g_ent_count)
+}
+
+// Спавн одной точки: выбор игрушки + создание entity + forward. Возвращает entity или 0.
+spawn_one_position(pos_idx)
+{
+    new toy_idx = resolve_toy_for_position(pos_idx)
+    if(toy_idx < 0 || toy_idx >= g_toy_count || !g_toy_model[toy_idx][0]) return 0
+
+    new ent = do_spawn_entity(toy_idx, pos_idx)
+    if(!ent) return 0
+
+    new ret
+    ExecuteForward(g_fwd_spawned, ret, ent, toy_idx, pos_idx)
+    return ent
 }
 
 pick_random_unused(const bool:used[], avail)
@@ -566,15 +632,15 @@ resolve_toy_for_position(pos_idx)
     // Точка зафиксирована на тире → выбираем случайную игрушку этого тира.
     if(bound_rarity >= 0 && bound_rarity <= TOY_RARITY_LEGENDARY)
     {
-        // Legendary в превышенном лимите → откатываемся к weighted random.
+        // Лимит легендарных исчерпан: НЕ подменяем заданную редкость другой.
+        // Точка просто не заспавнится, о чём сообщит вызывающий код.
         if(bound_rarity == TOY_RARITY_LEGENDARY
         && g_legendary_spawned >= TOY_MAX_LEGENDARY_PER_MAP)
-            return pick_toy_by_rarity()
+            return -1
 
         new picked = pick_unused_of_rarity(bound_rarity)
-        // Если игрушек этого тира нет — fallback к weighted.
         if(picked < 0 || picked >= g_toy_count)
-            return pick_toy_by_rarity()
+            return -1
         return picked
     }
 
@@ -598,7 +664,7 @@ pick_toy_by_rarity()
         total += rw[i]
     }
 
-    if(total <= 0) return 0
+    if(total <= 0) return -1
 
     new r = random_num(0, total - 1)
     new cumul = 0, selected_rarity = 0
@@ -643,7 +709,7 @@ pick_unused_of_rarity(rarity)
         }
     }
 
-    if(count == 0) return 0
+    if(count == 0) return -1
 
     new picked = avail[random_num(0, count - 1)]
     g_spawn_used_toy[picked] = true
@@ -897,12 +963,20 @@ public native_add_position(plugin_id, num_params)
     new Float:origin[3]
     get_array(1, _:origin, 3)
 
+    // Невалидные значения — явная ошибка, а не молчаливая подмена.
+    new rarity = get_param(3)
+    if(rarity < TOY_RARITY_ANY || rarity > TOY_RARITY_LEGENDARY) return -1
+
+    new mode = (num_params >= 4) ? get_param(4) : TOY_SPAWN_RANDOM
+    if(!can_set_position(rarity, mode, -1)) return -1
+
     new idx = g_pos_count
     g_pos_origin[idx][0] = origin[0]
     g_pos_origin[idx][1] = origin[1]
     g_pos_origin[idx][2] = origin[2]
     g_pos_yaw[idx]       = get_param_f(2)
-    g_pos_bound_rarity[idx] = get_param(3)
+    g_pos_bound_rarity[idx] = rarity
+    g_pos_spawn_mode[idx]   = mode
     g_pos_count++
 
     return idx
@@ -921,6 +995,7 @@ public native_remove_position(plugin_id, num_params)
         g_pos_origin[i][2] = g_pos_origin[i+1][2]
         g_pos_yaw[i]       = g_pos_yaw[i+1]
         g_pos_bound_rarity[i] = g_pos_bound_rarity[i+1]
+        g_pos_spawn_mode[i]   = g_pos_spawn_mode[i+1]
     }
     g_pos_count--
     return 1
@@ -931,13 +1006,22 @@ public native_update_position(plugin_id, num_params)
     new idx = get_param(1)
     if(idx < 0 || idx >= g_pos_count) return 0
 
+    new rarity = get_param(4)
+    if(rarity < TOY_RARITY_ANY || rarity > TOY_RARITY_LEGENDARY) return 0
+
+    // spawn_mode = -1 (или не передан) → сохранить текущий тип точки.
+    new mode = (num_params >= 5) ? get_param(5) : -1
+    if(mode < 0) mode = g_pos_spawn_mode[idx]
+    if(!can_set_position(rarity, mode, idx)) return 0
+
     new Float:origin[3]
     get_array(2, _:origin, 3)
     g_pos_origin[idx][0] = origin[0]
     g_pos_origin[idx][1] = origin[1]
     g_pos_origin[idx][2] = origin[2]
     g_pos_yaw[idx]       = get_param_f(3)
-    g_pos_bound_rarity[idx] = get_param(4)
+    g_pos_bound_rarity[idx] = rarity
+    g_pos_spawn_mode[idx]   = mode
     return 1
 }
 
@@ -967,16 +1051,7 @@ public native_spawn_at_position(plugin_id, num_params)
 {
     new pos_idx = get_param(1)
     if(pos_idx < 0 || pos_idx >= g_pos_count || !g_toy_count) return 0
-
-    new toy_idx = resolve_toy_for_position(pos_idx)
-    if(toy_idx < 0 || !g_toy_model[toy_idx][0]) return 0
-
-    new ent = do_spawn_entity(toy_idx, pos_idx)
-    if(!ent) return 0
-
-    new ret
-    ExecuteForward(g_fwd_spawned, ret, ent, toy_idx, pos_idx)
-    return ent
+    return spawn_one_position(pos_idx)
 }
 
 public native_respawn_all(plugin_id, num_params)
@@ -1041,5 +1116,75 @@ public native_set_map_file_count(plugin_id, num_params)
 public native_clear_positions(plugin_id, num_params)
 {
     g_pos_count = 0
+    arrayset(g_pos_spawn_mode, TOY_SPAWN_RANDOM, sizeof(g_pos_spawn_mode))
+    return 1
+}
+
+// ——— Тип точки спавна (случайная / гарантированная) ———
+
+parse_spawn_mode(const token[])
+{
+    if(equali(token, "spawn=random"))     return TOY_SPAWN_RANDOM
+    if(equali(token, "spawn=guaranteed")) return TOY_SPAWN_GUARANTEED
+    return -1
+}
+
+count_positions_by_mode(mode)
+{
+    new count
+    for(new pos = 0; pos < g_pos_count; pos++)
+        if(g_pos_spawn_mode[pos] == mode) count++
+    return count
+}
+
+// Проверяет, имеет ли смысл ставить гарантированную точку с такой редкостью:
+// есть ли подходящие модели и не превышен ли лимит легендарных на карте.
+bool:can_set_position(bound_rarity, spawn_mode, exclude_pos)
+{
+    if(spawn_mode != TOY_SPAWN_RANDOM && spawn_mode != TOY_SPAWN_GUARANTEED) return false
+    if(bound_rarity < TOY_RARITY_ANY || bound_rarity > TOY_RARITY_LEGENDARY) return false
+    if(spawn_mode == TOY_SPAWN_RANDOM) return true
+    if(bound_rarity >= 0 && !count_toys_of_rarity(bound_rarity)) return false
+
+    // Без обычных/редких/эпических моделей каждая ANY-точка тоже съедает лимит легендарных.
+    new bool:weighted_normal = ((g_weight_common > 0 && count_toys_of_rarity(TOY_RARITY_COMMON) > 0)
+        || (g_weight_rare > 0 && count_toys_of_rarity(TOY_RARITY_RARE) > 0)
+        || (g_weight_epic > 0 && count_toys_of_rarity(TOY_RARITY_EPIC) > 0))
+
+    new legends
+    if(bound_rarity == TOY_RARITY_LEGENDARY || (bound_rarity == TOY_RARITY_ANY && !weighted_normal))
+        legends++
+
+    for(new pos = 0; pos < g_pos_count; pos++)
+    {
+        if(pos == exclude_pos || g_pos_spawn_mode[pos] != TOY_SPAWN_GUARANTEED) continue
+        if(g_pos_bound_rarity[pos] == TOY_RARITY_LEGENDARY
+            || (g_pos_bound_rarity[pos] == TOY_RARITY_ANY && !weighted_normal)) legends++
+    }
+    return bool:(legends <= TOY_MAX_LEGENDARY_PER_MAP)
+}
+
+public native_get_pos_mode(plugin_id, num_params)
+{
+    new idx = get_param(1)
+    return (idx >= 0 && idx < g_pos_count) ? g_pos_spawn_mode[idx] : -1
+}
+
+public native_get_pos_count_by_mode(plugin_id, num_params)
+{
+    return count_positions_by_mode(get_param(1))
+}
+
+public native_can_set_position(plugin_id, num_params)
+{
+    return can_set_position(get_param(1), get_param(2), (num_params >= 3) ? get_param(3) : -1)
+}
+
+public native_set_pos_mode(plugin_id, num_params)
+{
+    new idx = get_param(1), mode = get_param(2)
+    if(idx < 0 || idx >= g_pos_count) return 0
+    if(!can_set_position(g_pos_bound_rarity[idx], mode, idx)) return 0
+    g_pos_spawn_mode[idx] = mode
     return 1
 }

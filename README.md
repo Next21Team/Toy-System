@@ -15,6 +15,13 @@
 - **Legacy compatibility** — old `data/toy_spawn/<map>.ini` files written by
   v2.0 (with numeric toy index in the 5th column) are auto-migrated: the
   parser takes the rarity of that toy as the new binding.
+- **Guaranteed spawn points** — a point can be marked as **guaranteed** (`spawn=guaranteed`,
+  independent of its rarity binding). Guaranteed points are filled first and do not
+  consume the `toy_count` / `count N` budget: 10 random points, `count 3` and 2
+  guaranteed points give 5 toys, provided suitable models and free entities exist.
+  Files without the marker keep loading as random, so existing maps are unaffected.
+  Note: with the new spawn logic `toy_count 0` means **zero** random toys, not the
+  old fallback of 10 (the fallback was removed together with the spawn rewrite).
 
 ---
 
@@ -602,6 +609,18 @@ Adventures Toy System — модульная система плагинов д�
 | Toy Pickup | `toy_pickup.amxx` | Взаимодействие игрока: HUD-подсказка, подбор клавишей E |
 | Toy Rewards | `toy_rewards.amxx` | Очки и анонс в чат при подборе |
 | Toy Announcer | `toy_announcer.amxx` | Периодические напоминания о неподобранных игрушках |
+
+---
+
+## Что нового в 2.1
+
+- **Гарантированные точки спавна** — точку можно пометить как **гарантированную**
+  (`spawn=guaranteed`, независимо от привязки к редкости). Гарантированные точки
+  заполняются первыми и не расходуют «бюджет» `toy_count` / `count N`: 10 случайных
+  точек, `count 3` и 2 гарантированные дают 5 игрушек при наличии подходящих моделей
+  и свободных сущностей. Файлы без этой метки грузятся как раньше — как случайные.
+  Важно: с новой логикой спавна `toy_count 0` — это ноль случайных игрушек,
+  а не прежние 10 по умолчанию (старый fallback убран вместе с переработкой спавна).
 
 ---
 
